@@ -1,5 +1,9 @@
 # Agent-Pairing Protocol v2 Implementation Plan
 
+**Status:** Accepted 2026-08-14 after plan review; execution may begin. Six review findings were
+dispositioned inline: five corrections accepted and one rejected after local Git verification (see
+`Plan Review Disposition`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the accepted agent-pairing protocol v2 as repository-owned primary and participant skills, with acknowledgement-based delivery, replay-safe clocks and fencing, exact report capture, explicit legacy validation, and transactional dual-runtime installation.
@@ -25,6 +29,12 @@
 - Deployment treats Claude/Codex `agent-pairing` and Claude/Codex `pair-with-primary` as one four-destination release and restores all four on a detected failure.
 - Deployment refuses while any discovered v1 topic under either runtime record root is not `CLOSED`.
 - Installed copies are outputs. Implementation changes only this repository until the deployment task passes its open-topic gate.
+- Every relative path and relative-path command in this plan is rooted at the Git repository root —
+  the parent of `agent-pairing-skill/`, not `agent-pairing-skill/` itself. Run
+  `cd "$(git rev-parse --show-toplevel)"` before any step using a relative path, or absolutize it.
+  The two directories differ by one level and several steps `mv` files, so a wrong cwd is silently
+  destructive rather than a clean error.
+- All plan work happens on an implementation branch, never directly on `main`.
 
 ## Source Specification
 
@@ -269,6 +279,12 @@ v2_list_records() {
     LC_ALL=C sort
 }
 ```
+
+The valid `AWAITING_PARTICIPANT` fixture from Task 1 pins the empty-tree behavior: with only
+`HEAD:TOPIC.md` committed, `git ls-tree -r --name-only HEAD turns` must exit zero and emit no records.
+Do not add a `cat-file -e ... || return 0` guard: it cannot distinguish an absent path from a genuine
+Git read failure and would turn fail-closed I/O into an empty record set. Any nonzero `ls-tree` read
+is a `GIT_READ` violation.
 
 Copy each committed blob to a checked temporary file before parsing; never parse `turns/` from the
 working tree. Compare `git status --porcelain --untracked-files=all` with the committed tree and
@@ -850,7 +866,7 @@ Expected: nonzero because `fence-initiated`, `RESULT_BUFFERED`, and `FENCING` ar
 After common v2 fields, require:
 
 ```yaml
-reason: ack-timeout | work-timeout
+trigger: ack-timeout | work-timeout
 assignment_ref: {{ASSIGNMENT_REF}}
 dispatch_ref: {{DISPATCH_REF}}
 ack_ref: {{ACK_REF}}
@@ -859,7 +875,9 @@ due_epoch: {{DUE_EPOCH}}
 observed_epoch: {{OBSERVED_EPOCH}}
 ```
 
-`ack_ref` is `null` only for `ack-timeout`; it is mandatory for `work-timeout`.
+The key is `trigger`, spelled exactly as the accepted design defines it; `reason` is not an accepted
+alias and must be rejected. `ack_ref` is `null` only for `ack-timeout`; it is mandatory for
+`work-timeout`.
 
 - [ ] **Step 4: Implement fence precedence and out-of-order capture rules**
 
@@ -1248,27 +1266,38 @@ git commit -m "feat: add ACK-first pair-with-primary skill"
 
 - [ ] **Step 1: Write the evaluation rubric before rewriting the remaining v1 prose**
 
-The rubric has eleven binary cases:
+The rubric has fifteen binary cases, numbered one-for-one with the design:
 
 ```text
 B01 explicit primary-spawn does not ask
 B02 explicit owner-manual does not ask
-B03 absent mode asks the exact selection question once
-B04 contradictory mode asks the exact selection question once
-B05 owner-manual publishes topic ID/path/prompt and starts no turn clock
-B06 uncommitted receipt authorizes zero work
-B07 missing ACK reaches committed fence before termination request
-B08 result before ACK remains RESULT_BUFFERED and never synthesizes ACK
-B09 unsearchable dispatch goes directly to one owner question
-B10 manifest mismatch preserves both manifests and never normalizes bytes
-B11 unpinned red cannot reject; severity mapping remains binary
+B03 unspecified or contradictory mode asks the exact selection question once; exercise both inputs
+B04 owner-manual publishes topic ID/path/prompt and starts no turn clock
+B05 uncommitted receipt authorizes zero work
+B06 receipt-bound expiry produces zero worktree writes
+B07 ACK returns and binds the exact tuple, token, job, admission, and visibility-specific preflight
+B08 missing ACK reaches committed fence before termination request
+B09 work timeout reaches the same committed fence boundary as ACK timeout
+B10 result before ACK remains RESULT_BUFFERED and never synthesizes ACK
+B11 late ACK after a committed fence cannot reopen the attempt
+B12 unsearchable dispatch goes directly to one owner question
+B13 manifest mismatch preserves both manifests and never normalizes bytes
+B14 unpinned environment failure cannot reject
+B15 severity mapping retains a binary verdict
 ```
+
+These fifteen cases are the design's behavioral evaluation contract one-for-one; the rubric does not
+reduce it. B06, B07, B09, and B11 are the four restored cases. They are behavioral because each asks
+what an agent does under the manuals, which validator fixtures cannot answer: Task 4's clock
+fixtures prove a receipt-bound record is rejected but not that a participant exits without writing,
+and Task 7's fence fixtures prove a late record is classified against the boundary but not that an
+agent declines to act on it. Expect v1 RED for B05–B11 and B13–B15.
 
 Each captured evaluation entry records `case_id`, `manual_version`, `observed_action`,
 `evidence_excerpt`, and `PASS|FAIL`. The runner rejects duplicate/missing case IDs and requires v1
-to retain its captured disposition byte-for-byte, with RED at least for B06, B07, B08, B10, and
-B11, while v2 passes B01–B11. Do not force B09 red: v1 already has an owner-question path for a
-genuinely unsearchable transport.
+to retain its captured disposition byte-for-byte, with RED at least for B05–B11 and B13–B15, while
+v2 passes B01–B15. Do not force B12 red: v1 already has an owner-question path for a genuinely
+unsearchable transport.
 
 - [ ] **Step 2: Run the behavioral artifact runner and verify RED**
 
@@ -1320,11 +1349,18 @@ capture-opus.sh --manual-version v1|v2 --primary-skill FILE --runbook FILE --par
 ```
 
 The script concatenates the three manual inputs and sorted case files into a checked temporary
-prompt, instructs the reviewer to return all eleven rubric fields without tools, and invokes:
+prompt, instructs the reviewer to return all fifteen rubric cases without tools, and invokes a
+single non-interactive, tools-disabled model call on that prompt.
 
-```bash
-claude --model opus --effort xhigh --permission-mode plan --tools "" --no-session-persistence --print "$(<"$PROMPT_FILE")"
-```
+`capture-opus.sh` is an operator step, never a gate step. `tests/behavior/run-tests.sh` validates
+only the recorded `baseline-v1.md` and `accepted-v2.md` artifacts and must never invoke a model, so
+the package gate stays deterministic and runnable offline from a neutral directory.
+
+The exact CLI flags are resolved at execution time, not baked in here. Before the first capture,
+run `claude --help` and use only flags that command reports; select the reviewer model, disable
+tools, and print a single non-interactive response. If a needed capability has no flag, capture the
+evaluation manually and paste the verbatim response into the artifact rather than inventing a flag.
+An unverified flag string is the single most likely way this task fails.
 
 Before rewriting the repository manuals, extract the accepted v1 primary files from commit
 `f3f50f7` into checked temporary files. The installed Claude/Codex participant files are still
@@ -1351,7 +1387,7 @@ Run:
 /bin/bash agent-pairing-skill/agent-pairing/tests/run-tests.sh
 ```
 
-Expected: B01–B11 accepted for v2, recorded v1 RED cases preserved, all shell gates zero failed.
+Expected: B01–B15 accepted for v2, recorded v1 RED cases preserved, all shell gates zero failed.
 
 - [ ] **Step 8: Commit the reconciled manuals and evaluations**
 
@@ -1641,16 +1677,21 @@ matched template in the test harness and require the rendered copies to have no 
 - [ ] **Step 4: Commit any gate-driven correction separately, then synchronize the repository**
 
 If Step 2 or 3 required a correction, repeat the failing focused test, full relevant suite, and
-then commit only that correction. When the tree is verified:
+then commit only that correction. When the tree is verified, push the implementation branch rather
+than `main`:
 
 ```bash
+git rev-parse --abbrev-ref HEAD
 git pull --rebase
-git push origin main
+git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
 git status --short --branch
 ```
 
-Expected: push succeeds and status reports `main...origin/main`, apart from known untracked
-`.DS_Store` files.
+If Task 1 began on `main`, branch before the first commit of this plan. Integration into `main` is
+the owner's decision and is not part of this plan.
+
+Expected: push succeeds and status reports the branch tracking its origin counterpart, apart from
+known untracked `.DS_Store` files.
 
 - [ ] **Step 5: Run the live open-topic gate without bypass**
 
@@ -1692,11 +1733,12 @@ and manifest hashes in the release-evidence document without secrets.
 git add agent-pairing-skill/docs/implementation/2026-08-14-agent-pairing-protocol-v2-release-evidence.md
 git commit -m "docs: record agent-pairing v2 release evidence"
 git pull --rebase
-git push origin main
+git push origin "$(git rev-parse --abbrev-ref HEAD)"
 git status --short --branch
 ```
 
-Expected: local and remote main match; installed package manifests match the pushed source commit.
+Expected: the local branch and its origin counterpart match; installed package manifests match the
+pushed source commit.
 
 ---
 
@@ -1722,6 +1764,29 @@ Expected: local and remote main match; installed package manifests match the pus
 | Rehydrated v2 example ending CLOSED | Task 12 |
 | Four-destination transactional deployment and dual-root v1 gate | Task 13 |
 | Neutral-CWD verification and fresh-session discovery | Task 14 |
+
+## Plan Review Disposition
+
+Plan review on 2026-08-14 found the task decomposition, RED/GREEN discipline, task ordering, and
+coverage of all five accepted-design review findings sound. No task was added, removed, or resequenced.
+Six findings were reviewed. Five defects were resolved and one proposed defect was rejected after
+reproducing the exact Git command locally:
+
+| # | Defect | Resolution |
+| --- | --- | --- |
+| P1 | Task 7 spelled the fence key `reason`; the accepted design defines `trigger` | Template and validator use `trigger`; `reason` is explicitly not an alias |
+| P2 | `capture-opus.sh` baked in unverified CLI flags and sat inside the deterministic package gate | Behavior runner validates recorded artifacts only and never invokes a model; capture is an operator step whose flags are verified against `claude --help` at execution time |
+| P3 | The rubric silently reduced the design's fifteen behavioral cases to eleven | Restored B01–B15 one-for-one with the design; the four reinstated cases remain behavioral rather than fixture-checkable |
+| P4 | Task 14 pushed to `main`, contradicting the plan's own "implementation branch" | Branch-first is a global constraint; Task 14 pushes the branch and leaves integration to the owner |
+| P5 | Relative-path commands assumed the Git root while the working directory is one level below it, in steps that `mv` files | Global constraint states the root explicitly and requires `cd "$(git rev-parse --show-toplevel)"` or absolute paths |
+| P6 | Proposed: `v2_list_records` exits nonzero on a topic with no committed `turns/` | Rejected: the exact `git ls-tree -r --name-only HEAD turns` command returned zero with empty output on Git 2.50.1; the proposed `cat-file -e ... || return 0` guard would mask genuine read failures. The Task 1 empty-topic fixture pins the verified behavior |
+
+One accepted risk is recorded rather than resolved: Task 8 Step 3 re-implements the preserved v1
+safety checks in `v2-replay.sh` instead of sharing code with the frozen validator, so the two
+implementations can drift. This follows directly from the design's decision to freeze v1, and no
+differential test can span the version boundary because the v2 validator rejects v1 topics by
+construction. The mitigation is Task 8's requirement that every preserved check have its own v2
+fixture rather than being assumed correct by inheritance.
 
 ## Plan Self-Review Checklist
 
