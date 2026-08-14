@@ -1,6 +1,7 @@
 # Agent-Pairing Protocol v2 Design
 
-**Status:** Approved design; implementation awaits review of this written specification
+**Status:** Accepted 2026-08-14 after specification review; implementation may begin. Five review
+findings were resolved inline (see `Review disposition`).
 
 **Date:** 2026-08-14
 
@@ -200,6 +201,27 @@ durable address must never contain a credential.
 non-null reference. `searchability: unsearchable` requires a null recipe and means replay skips
 token search rather than pretending a search happened.
 
+`capability` and `worktree_visible` are validated fields, not documentation:
+
+- `capability: commits` is the only value that admits a participant-authored landed-commit handoff,
+  and it requires `worktree_visible: true`.
+- `capability: writes-repo-only` admits either uncommitted worktree changes when the worktree is
+  visible or a relay `patch.diff` when it is not. It does not admit a participant-authored
+  `result_sha`. If the primary applies a verified relay patch, the resulting `result_sha` names the
+  primary-authored application commit and retains the existing `On-behalf-of` and `Applied-by`
+  provenance.
+- `capability: read-only` is report-only by contract. It may use either report channel but cannot
+  produce a landed commit, uncommitted worktree changes, or a relay `patch.diff`. This is a protocol
+  permission rule, not a claim that emitting patch bytes physically requires filesystem writes.
+- `worktree_visible: true` requires the ACK to carry `observed_head` and `preflight_clean: true`.
+  `worktree_visible: false` requires those fields to be null and instead binds the ACK to the
+  assignment with `relayed_base_sha`. An invisible participant cannot use `capability: commits`, but
+  may take a report-only assignment or use the existing relay-patch path under
+  `capability: writes-repo-only`.
+
+These constraints are checked at admission, at assignment binding, and again at ACK, so an illegal
+capability transition fails closed instead of surfacing later as an unexplained drift.
+
 ## Assignment and timing model
 
 An assignment replaces the absolute deadline with two durations:
@@ -208,7 +230,7 @@ An assignment replaces the absolute deadline with two durations:
 admission_ref: ADMISSION_RECORD
 ack_timeout_seconds: POSITIVE_INTEGER
 work_timeout_seconds: POSITIVE_INTEGER
-verification_profile_id: PROFILE_ID
+verification_profile_id: PROFILE_ID | null
 ```
 
 The assignment ACK timeout defaults from admission but is materialized explicitly so replay never
@@ -217,12 +239,19 @@ depends on mutable configuration. Work duration is task-specific.
 The intent adds:
 
 ```yaml
+admission_ref: ADMISSION_RECORD
 idempotency_token: UNIQUE_TOKEN
 expected_dispatch_ref: DISPATCH_FILENAME
+receipt_commit_timeout_seconds: POSITIVE_INTEGER
 receipt_commit_by_epoch: INTEGER
 ```
 
-`receipt_commit_by_epoch` equals the intent epoch plus the admitted receipt-commit timeout. The
+`receipt_commit_by_epoch` equals the intent epoch plus `receipt_commit_timeout_seconds`. The intent
+materializes that addend and repeats its assignment's `admission_ref` for the same reason the ACK
+timeout is materialized on the assignment: the validator must be able to assert
+`receipt_commit_by_epoch == recorded_epoch + receipt_commit_timeout_seconds` from the record alone,
+without reading a mutable admission default. The materialized value must equal the admitted
+`receipt_commit_timeout_seconds`, and the intent's `admission_ref` must equal the assignment's. The
 dispatch payload includes the expected filename and bound.
 
 The participant may receive an initial transport prompt before the receipt is committed because
@@ -256,13 +285,21 @@ After observing the committed receipt, the participant's first emitted message c
 - Exact idempotency token.
 - Exact admission and dispatch references.
 - Exact job/session binding when visible to the participant.
-- `git -C SESSION_WORKTREE rev-parse HEAD` output.
-- `git -C SESSION_WORKTREE status --porcelain` output.
 - Declared ACK evidence class.
 
-The participant emits this before modifying the worktree. The primary accepts it as an `ack`
-record only when the tuple and all bindings match, the observed HEAD equals the assignment
-`base_sha`, and the preflight tree is clean:
+The preflight evidence is conditional on the admitted visibility:
+
+- With `worktree_visible: true`, the participant includes
+  `git -C SESSION_WORKTREE rev-parse HEAD` and
+  `git -C SESSION_WORKTREE status --porcelain` output.
+- With `worktree_visible: false`, the participant explicitly reports `observed_head: null` and
+  `preflight_clean: null`, and echoes the assigned base as `relayed_base_sha`. This binds the relay
+  input but does not claim direct observation of worktree state; the primary separately verifies
+  that the shared worktree remains stationary before accepting the ACK.
+
+The participant emits this before modifying the worktree or authoring relay patch bytes. The
+primary accepts it as an `ack` record only when the tuple and all bindings match and the
+visibility-specific preflight contract is satisfied:
 
 ```yaml
 kind: ack
@@ -272,12 +309,18 @@ dispatch_ref: DISPATCH_RECORD
 admission_ref: ADMISSION_RECORD
 job_id: EXACT_RECEIPT_VALUE
 idempotency_token: EXACT_INTENT_VALUE
-observed_head: EXACT_ASSIGNMENT_BASE_SHA
-preflight_clean: true
+observed_head: EXACT_ASSIGNMENT_BASE_SHA | null
+preflight_clean: true | null
+relayed_base_sha: EXACT_ASSIGNMENT_BASE_SHA | null
 ack_evidence_class: transport-attested | human-relayed
 ack_captured_epoch: INTEGER
 work_due_epoch: INTEGER
 ```
+
+For a visible admission, `observed_head` must equal the assignment `base_sha`,
+`preflight_clean` must be true, and `relayed_base_sha` must be null. For an invisible admission,
+`observed_head` and `preflight_clean` must be null, `relayed_base_sha` must equal the assignment
+`base_sha`, and the primary's own pre-ACK worktree check must be clean and stationary.
 
 `work_due_epoch` must equal `ack_captured_epoch + work_timeout_seconds`.
 
@@ -404,7 +447,7 @@ The default v2 validator derives these states:
 | `DISPATCH_UNKNOWN` | Intent without receipt | Token search or one owner question |
 | `AWAITING_ACK` | Receipt without ACK or result capture | Wait or fence at ACK due epoch |
 | `RESULT_BUFFERED` | Result capture without ACK | Wait for ACK or fence |
-| `WORKING` | Valid ACK, no capture or terminal result | Observe progress or fence at work due epoch |
+| `WORKING` | Valid ACK, no terminal result | Observe progress or fence at work due epoch |
 | `FENCING` | `fence-initiated` without terminal result | Confirm termination or ask owner |
 | `AWAITING_OWNER` | Unanswered owner question | Stop |
 | `OWNER_ACTION_PENDING` | Actionable answer not materialized | Materialize idempotently |
@@ -421,6 +464,12 @@ Precedence is fail-closed:
 4. A fence record takes precedence over ACK, capture, or work states.
 5. A result capture without ACK takes precedence over ordinary `AWAITING_ACK`.
 6. Worktree drift and quarantine prevent `IDLE`.
+
+`WORKING` is ACK-anchored and capture-insensitive: a valid ACK with no terminal result is `WORKING`
+whether or not a `result-capture` record exists. A capture only changes the primary's next action —
+re-run verification and materialize the terminal result rather than observe progress — and never a
+capture-only classification. `RESULT_BUFFERED` is therefore the single capture-derived state and
+applies only when the ACK is absent.
 
 The validator emits stored due epochs but never converts elapsed wall time into a state. Only a
 committed `fence-initiated` record performs that transition.
@@ -440,7 +489,16 @@ committed `fence-initiated` record performs that transition.
 
 An uncommitted v2 receipt follows the existing partial-receipt discipline: validate exact tuple and
 required fields, then commit as `validated-uncommitted`; otherwise hash its exact bytes into one
-owner question before removal. Uncommitted ACK, capture, fence, or result files are revalidated by
+owner question before removal.
+
+A `validated-uncommitted` receipt is re-stamped, never restored. `dispatched_epoch` is the epoch at
+which the primary commits the recovered receipt, and `ack_due_epoch` is recomputed from that value;
+any pre-crash epoch found in the uncommitted bytes is preserved as `pre_crash_dispatched_epoch`
+evidence only and is never used in arithmetic. Restoring the pre-crash epoch would let
+`ack_due_epoch` be already past at the moment the receipt first becomes visible to the participant,
+recreating the v1 pre-expired-deadline defect inside the recovery path. Because the ACK budget is
+delivery latency and the participant cannot observe an uncommitted receipt, the budget must start
+when visibility starts. Uncommitted ACK, capture, fence, or result files are revalidated by
 kind before any commit. Unknown residue stops replay.
 
 ## Environment parity
@@ -527,7 +585,13 @@ The package test entry point runs all of:
 - One-defect fixtures for each new violation code.
 - Missing, malformed, and mixed protocol version cases.
 - Admission binding and illegal capability transitions.
-- Receipt commit bound and committed-object consumption.
+- Visible and invisible ACK preflight variants, including relay-base binding and relay-patch
+  capability compatibility.
+- Receipt commit bound, intent addend identity, and committed-object consumption.
+- `validated-uncommitted` recovery re-stamping, including a case whose pre-crash epoch would have
+  produced an already-expired ACK budget.
+- `WORKING` derived identically with and without a preceding `result-capture`.
+- Multi-record-root open-v1 gating, including an open topic present only in the non-default root.
 - ACK binding, same-second epochs, and due-epoch arithmetic.
 - Primary crashes at every durable boundary.
 - ACK and work-timeout fencing.
@@ -551,10 +615,15 @@ Deployment is one release across four destinations:
 - Codex `agent-pairing`
 - Codex `pair-with-primary`
 
-The installer accepts repeatable `--record-root ABSOLUTE_PATH` arguments and defaults to
-`~/.claude/agent-pairing` when none are provided. Before deployment it enumerates every topic directly
-under each record root, selects the validator named by that topic's declared protocol version, and
-refuses the release if any discovered v1 topic is not `CLOSED`.
+The installer accepts repeatable `--record-root ABSOLUTE_PATH` arguments. When none are provided it
+defaults to the record root of every runtime it is about to write — `~/.claude/agent-pairing` and
+`~/.codex/agent-pairing` — because a release that replaces both runtimes must gate on the open
+topics of both. A default covering only one runtime would let an open Codex v1 topic pass a check it
+was never enumerated by, which is fail-open on a stated safety precondition. A configured default
+root that does not exist is reported and skipped; an explicitly passed `--record-root` that does not
+exist is an error. Before deployment the installer enumerates every topic directly under each record
+root, selects the validator named by that topic's declared protocol version, and refuses the release
+if any discovered v1 topic is not `CLOSED`.
 
 The installer:
 
@@ -587,7 +656,8 @@ The v2 design is implemented only when all of these are true:
 5. Historical v1 validation remains explicitly available and its suite remains green.
 6. Participant work cannot start from an uncommitted receipt.
 7. A committed receipt starts only the ACK budget; a valid ACK starts the work budget.
-8. ACK binds attempt, token, admission, job, evidence class, and preflight HEAD.
+8. ACK binds attempt, token, admission, job, evidence class, and either an observed preflight HEAD
+   or the explicit relay base required by the admission's visibility.
 9. ACK and work expiry commit a fence before termination is requested.
 10. Missing ACK never authorizes automatic retry.
 11. Result-before-ACK is durably buffered and never treated as an implied ACK.
@@ -597,6 +667,25 @@ The v2 design is implemented only when all of these are true:
 15. Review verdict mapping follows the approved severity policy.
 16. Both runtime roots receive the same verified package release or both are restored.
 17. All behavioral evaluations and automated suites pass from a neutral non-repository directory.
+
+## Review disposition
+
+Specification review on 2026-08-14 found no architectural objection: the two clocks, committed-only
+receipt consumption, ACK evidence class, durable fence boundary, author-finalized manifest, and
+frozen v1 validator each trace to a Confirmed finding in the investigation, and the deferrals match
+the recorded Opus dispositions. Five defects were found in the written specification and resolved in
+this revision:
+
+| # | Defect | Resolution |
+| --- | --- | --- |
+| R1 | `WORKING` was defined incompatibly by the classification table ("no capture") and the recovery table ("with captured output") | `WORKING` is ACK-anchored and capture-insensitive; `RESULT_BUFFERED` is the only capture-derived state |
+| R2 | `receipt_source: validated-uncommitted` left `dispatched_epoch` provenance unstated, allowing a recovered receipt to publish an already-expired ACK budget | Recovered receipts are re-stamped at commit; the pre-crash epoch is retained as evidence only |
+| R3 | `capability` and `worktree_visible` were schema fields with no stated rule, and so were unvalidatable | Both are bound to explicit handoff, report-channel, and ACK-preflight constraints |
+| R4 | `receipt_commit_by_epoch` was checkable only against a mutable admission default, unlike `ack_due_epoch` | The intent materializes `receipt_commit_timeout_seconds` and repeats `admission_ref` |
+| R5 | The open-v1 deployment gate defaulted to one record root while the release replaced two runtimes | The default enumerates the record root of every runtime being written |
+
+No finding changed the state machine's shape, so the acceptance criteria and behavioral evaluation
+contract stand as written; only the automated validation contract gained cases.
 
 ## Deferred work
 
