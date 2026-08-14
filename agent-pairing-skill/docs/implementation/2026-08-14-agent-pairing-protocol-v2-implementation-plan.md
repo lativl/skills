@@ -27,7 +27,9 @@ dispositioned inline: five corrections accepted and one rejected after local Git
 - `BLOCKING`, `GATE`, and `NONBLOCKING` are primary policy in v2.0; the verdict remains binary and the validator does not parse findings prose.
 - No background daemon, persistent monitor, parallel turn, multiple primary, cross-machine protocol, cryptographic report authentication, or v2.1 findings ledger is introduced.
 - Deployment treats Claude/Codex `agent-pairing` and Claude/Codex `pair-with-primary` as one four-destination release and restores all four on a detected failure.
-- Deployment refuses while any discovered v1 topic under either runtime record root is not `CLOSED`.
+- Deployment permits only discovered v1 topics that are exactly `CLOSED`, plus structurally invalid
+  legacy records carrying an exact owner-authorized acknowledgement; valid non-`CLOSED` topics and
+  unavailable evidence always refuse.
 - Installed copies are outputs. Implementation changes only this repository until the deployment task passes its open-topic gate.
 - Every relative path and relative-path command in this plan is rooted at the Git repository root —
   the parent of `agent-pairing-skill/`, not `agent-pairing-skill/` itself. Run
@@ -63,6 +65,8 @@ dispositioned inline: five corrections accepted and one rejected after local Git
 | `agent-pairing-skill/agent-pairing/example/` | Rehydrated v2 record/work repositories that end in `CLOSED` |
 | `agent-pairing-skill/scripts/install.sh` | Four-destination preflight, stage, verify, swap, rollback, and post-install parity |
 | `agent-pairing-skill/tests/install-smoke.sh` | Temporary-root happy path, open-v1 refusal, injected rollback failures, and mode/byte parity |
+| `agent-pairing-skill/docs/implementation/*-legacy-invalid-ack.yaml` | Optional machine-readable owner acknowledgement pinned to one immutable invalid v1 record state |
+| `agent-pairing-skill/docs/implementation/*-release-evidence.md` | Topic inventory, gate dispositions, acknowledgement/file digests, installation results, and discovery evidence |
 
 ---
 
@@ -331,8 +335,8 @@ git commit -m "feat: validate committed agent-pairing v2 records"
 **Files:**
 - Modify: `agent-pairing-skill/agent-pairing/templates/TOPIC.md`
 - Create: `agent-pairing-skill/agent-pairing/templates/admission.md`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:101`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:47`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `OPEN — opening a topic`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Transport admission`
 - Modify: `agent-pairing-skill/agent-pairing/scripts/lib/v2-schema.sh`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/admission/`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
@@ -462,8 +466,8 @@ git commit -m "feat: admit agent-pairing participants explicitly"
 - Modify: `agent-pairing-skill/agent-pairing/templates/intent.md`
 - Modify: `agent-pairing-skill/agent-pairing/templates/dispatch.md`
 - Modify: `agent-pairing-skill/agent-pairing/scripts/lib/v2-schema.sh`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:162`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:139`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `CYCLE — dispatch clocks`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Poll cadence and clocks`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/clocks/`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
 
@@ -595,8 +599,8 @@ git commit -m "feat: add replayable dispatch and acknowledgement clocks"
 - Create: `agent-pairing-skill/agent-pairing/templates/ack.md`
 - Modify: `agent-pairing-skill/agent-pairing/templates/onboarding.md`
 - Modify: `agent-pairing-skill/agent-pairing/scripts/lib/v2-schema.sh`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:164`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:47`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `CYCLE — acknowledgement`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Transport admission`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/ack/`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
 
@@ -699,8 +703,8 @@ git commit -m "feat: require visibility-aware participant acknowledgements"
 - Modify: `agent-pairing-skill/agent-pairing/templates/result.md`
 - Modify: `agent-pairing-skill/agent-pairing/scripts/lib/v2-record.sh`
 - Modify: `agent-pairing-skill/agent-pairing/scripts/lib/v2-schema.sh`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:190`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:130`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `CYCLE — result capture`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Report channels and relay`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/capture/`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
 
@@ -820,8 +824,8 @@ git commit -m "feat: preserve exact agent-pairing report bytes"
 - Modify: `agent-pairing-skill/agent-pairing/templates/late.md`
 - Modify: `agent-pairing-skill/agent-pairing/scripts/lib/v2-schema.sh`
 - Create: `agent-pairing-skill/agent-pairing/scripts/lib/v2-replay.sh`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:393`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:160`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `FENCE — durable timeout boundary`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Poll cadence and clocks`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/fence/`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
 
@@ -934,7 +938,7 @@ git commit -m "feat: fence expired agent-pairing attempts durably"
 - Modify: `agent-pairing-skill/agent-pairing/templates/owner-question.md`
 - Modify: `agent-pairing-skill/agent-pairing/templates/owner-answer.md`
 - Modify: `agent-pairing-skill/agent-pairing/templates/close.md`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:436`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `RESUME — deterministic replay`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/classification/`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/fixtures/precedence/`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
@@ -1039,8 +1043,8 @@ git commit -m "feat: replay agent-pairing v2 topics deterministically"
 - Modify: `agent-pairing-skill/agent-pairing/templates/assignment.md`
 - Modify: `agent-pairing-skill/agent-pairing/templates/result.md`
 - Modify: `agent-pairing-skill/agent-pairing/templates/onboarding.md`
-- Modify: `agent-pairing-skill/agent-pairing/SKILL.md:218`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:325`
+- Modify: `agent-pairing-skill/agent-pairing/SKILL.md` — section `Verification and review policy`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Environment parity`
 - Create: `agent-pairing-skill/agent-pairing/tests/v2/manual-contract.sh`
 - Modify: `agent-pairing-skill/agent-pairing/tests/v2/run-tests.sh`
 
@@ -1502,10 +1506,12 @@ git commit -m "test: add closed agent-pairing v2 replay example"
 **Files:**
 - Create: `agent-pairing-skill/scripts/install.sh`
 - Create: `agent-pairing-skill/tests/install-smoke.sh`
-- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md:198`
+- Modify: `agent-pairing-skill/agent-pairing/RUNBOOK.md` — section `Installing and updating this package`
 
 **Interfaces:**
-- Consumes: repository `agent-pairing` and `pair-with-primary` packages, both validators, package tests, and zero or more explicit record roots.
+- Consumes: repository `agent-pairing` and `pair-with-primary` packages, both validators, package
+  tests, zero or more explicit record roots, and zero or more explicit legacy-invalid
+  acknowledgement files.
 - Produces: byte/mode-identical Claude and Codex installations or a coherent rollback to the previous four-package release.
 
 - [ ] **Step 1: Write installer smoke tests before the installer**
@@ -1522,6 +1528,11 @@ missing configured default root reported and skipped
 open v1 topic only under Claude default refuses
 open v1 topic only under Codex default refuses
 closed v1 topics under both defaults permit install
+invalid v1 topic without acknowledgement refuses
+invalid v1 topic with exact clean-HEAD/tree/output-digest acknowledgement permits
+stale or duplicate acknowledgement refuses
+acknowledgement cannot override a validating non-CLOSED topic or a v2 violation
+validator execution, Git-read, or unavailable-evidence failure cannot be acknowledged
 v2 topic uses default v2 validator
 source validation failure leaves all four old packages
 failure after first swap restores all four old packages
@@ -1551,18 +1562,35 @@ Support:
 --claude-root ABSOLUTE_CLAUDE_HOME
 --codex-root ABSOLUTE_CODEX_HOME
 --record-root ABSOLUTE_RECORD_ROOT
+--legacy-invalid-ack ABSOLUTE_ACK_FILE
 ```
 
-`--record-root` is repeatable. With none supplied, inspect both
+`--record-root` and `--legacy-invalid-ack` are repeatable. With no record root supplied, inspect both
 `CLAUDE_ROOT/agent-pairing` and `CODEX_ROOT/agent-pairing`; report and skip a missing default. Refuse
 empty, relative, `/`, whitespace-only, and `..`-escaping paths before `mkdir`, move, or removal.
+Parse acknowledgement files as data, never `source` them or evaluate their values.
 
 - [ ] **Step 4: Implement the open-v1 deployment gate**
 
 Enumerate direct child topic repositories under every selected record root. A missing
 `protocol_version` is historical v1; explicit `1` is v1; exact `2` is v2; any other value blocks
-deployment. Run the corresponding validator from the source package. A v1 topic permits deployment
-only when its exact classification is `CLOSED`.
+deployment. Run the corresponding validator from the source package and implement exactly these
+outcomes:
+
+```text
+v1 check exits 0 with exact CLOSED                 permit
+v1 check exits 0 with any other/unverified output refuse; acknowledgement forbidden
+v1 check exits 2 with deterministic violations    refuse unless one exact acknowledgement matches
+v2 violation or any other validator/read outcome  refuse; acknowledgement forbidden
+```
+
+For an exit-2 v1 record, require one acknowledgement with exact `ack_version`, canonical topic
+path, clean `record_head`, `record_tree`, `validator_exit: 2`, lowercase output SHA-256, owner,
+tracker reference, one-line reason, and UTC timestamp. Re-run the frozen validator and require the
+same exit/output digest; reject dirty records, stale objects, duplicates, malformed values, and an
+acknowledgement naming any validating topic. Before staging, print every accepted acknowledgement
+and its own file SHA-256 with the bound owner/tracker/reason and record/validator evidence. No topic
+name or `demo` convention bypasses enumeration.
 
 - [ ] **Step 5: Implement stage, manifest verification, swap, and rollback**
 
@@ -1585,8 +1613,11 @@ post-install validations and manifest comparisons pass.
 
 - [ ] **Step 6: Make the smoke suite prove rollback and parity**
 
-After every injected failure, assert all four old sentinel files and their hashes remain. After
-success, compare source and installed manifests byte-for-byte and run:
+After every injected failure, assert all four old sentinel files and their hashes remain. Assert
+that accepted legacy-invalid acknowledgements are printed with their file/evidence digests, stale
+acknowledgements fail after either record or output changes, and no acknowledgement permits an
+otherwise classifiable non-`CLOSED` topic. After success, compare source and installed manifests
+byte-for-byte and run:
 
 ```bash
 /bin/bash "$CLAUDE_ROOT/skills/agent-pairing/tests/run-tests.sh"
@@ -1622,6 +1653,8 @@ git commit -m "feat: install agent-pairing skills transactionally"
 
 **Files:**
 - Create: `agent-pairing-skill/docs/implementation/2026-08-14-agent-pairing-protocol-v2-release-evidence.md`
+- Create only after owner approval if the invalid legacy topic remains under a live root:
+  `agent-pairing-skill/docs/implementation/2026-08-14-agent-pairing-protocol-v2-legacy-invalid-ack.yaml`
 - Modify only if a gate exposes a defect: files owned by Tasks 1–13
 
 **Interfaces:**
@@ -1693,18 +1726,49 @@ the owner's decision and is not part of this plan.
 Expected: push succeeds and status reports the branch tracking its origin counterpart, apart from
 known untracked `.DS_Store` files.
 
-- [ ] **Step 5: Run the live open-topic gate without bypass**
+- [ ] **Step 5: Materialize every live-topic disposition, then run the gate**
 
-Run the installer in validation mode if implemented, or its normal preflight before swaps. It must
-inspect both `~/.claude/agent-pairing` and `~/.codex/agent-pairing`. If any v1 topic is not CLOSED,
-stop the deployment and close that topic under v1; never edit the live package to bypass the gate.
+Before the package swap, refresh the inventory under both `~/.claude/agent-pairing` and
+`~/.codex/agent-pairing` and record every discovered topic, classification or exact validator
+failure, owner, tracker, and disposition in release evidence. The inventory known at plan review is:
+
+| Topic | Observed state | Owner | Tracker | Required disposition before swap |
+| --- | --- | --- | --- | --- |
+| `agent-pairing-v2-plan-review-round-2` | `OPEN (dispatched)` | Vitaliy L | `Work-5mjj.1` | Finish the approval cycle and close under frozen v1 before deployment; this self-referential release-review topic cannot remain open while its manuals are replaced |
+| `demo` | `OPEN (dispatched)` | Vitaliy L | `Work-5mjj.2` | Fence/finish and close under frozen v1; only after closure may it be archived outside live roots |
+| `invoicing-platform-integration-implementation-review` | `IDLE` | Vitaliy L | `Work-5mjj.3` | Close under frozen v1; `IDLE` can accept a later v1 turn and therefore is not deployment-safe |
+| `invoicing-platform-onboarding-design-review` | frozen-v1 validator exit 2 | Vitaliy L | `Work-5mjj.4` | Owner either archives the immutable record outside live roots or approves an exact legacy-invalid acknowledgement; never rewrite its committed records |
+
+Refresh this table rather than assuming it remains exhaustive. Any newly discovered topic gets its
+own owner, durable tracker, and disposition before the gate may pass. Demonstrations must live
+outside production record roots; names never exempt an existing topic.
+
+If `Work-5mjj.4` approves acknowledgement, create the machine-readable YAML sidecar with the exact
+schema from the design. Bind it to a clean record `HEAD`, `HEAD^{tree}`, exit 2, and SHA-256 of the
+complete frozen-validator output; capture the acknowledgement file's own SHA-256 in release
+evidence. Commit and push that sidecar before using it as deployment input:
+
+```bash
+git add agent-pairing-skill/docs/implementation/2026-08-14-agent-pairing-protocol-v2-legacy-invalid-ack.yaml
+git commit -m "docs: acknowledge immutable invalid v1 pairing record"
+git pull --rebase
+git push origin "$(git rev-parse --abbrev-ref HEAD)"
+```
+
+Run the installer preflight. Exact `CLOSED` permits. A validating non-`CLOSED` topic, v2 violation,
+unavailable evidence, validator/read failure, stale acknowledgement, or unacknowledged exit-2 v1
+record stops deployment. The explicit, exact acknowledgement path is part of the gate—not a live
+package edit or an implicit bypass.
 
 - [ ] **Step 6: Deploy the one verified release to both runtimes**
 
-Run:
+Run one command. Use the second form only when the pushed acknowledgement from Step 5 exists and
+its owner decision is recorded:
 
 ```bash
 /bin/bash /Users/vlysovych/Personal/projects/skills/agent-pairing-skill/scripts/install.sh --source /Users/vlysovych/Personal/projects/skills/agent-pairing-skill --claude-root /Users/vlysovych/.claude --codex-root /Users/vlysovych/.codex
+
+/bin/bash /Users/vlysovych/Personal/projects/skills/agent-pairing-skill/scripts/install.sh --source /Users/vlysovych/Personal/projects/skills/agent-pairing-skill --claude-root /Users/vlysovych/.claude --codex-root /Users/vlysovych/.codex --legacy-invalid-ack /Users/vlysovych/Personal/projects/skills/agent-pairing-skill/docs/implementation/2026-08-14-agent-pairing-protocol-v2-legacy-invalid-ack.yaml
 ```
 
 Expected: source validation, four stages, four swaps, four post-install validations, and cross-root
@@ -1725,7 +1789,9 @@ Use pair-with-primary. Explain only whether you read an uncommitted dispatch rec
 
 The first answer must select `owner-manual` without asking. The second must say committed receipt
 only and no Git notes. Record commands, output, installed paths, source commit, installer result,
-and manifest hashes in the release-evidence document without secrets.
+manifest hashes, the refreshed topic inventory, every tracker disposition, and every accepted
+legacy-invalid acknowledgement plus its record/output/file digests in the release-evidence document
+without secrets.
 
 - [ ] **Step 8: Commit and push release evidence**
 
@@ -1762,8 +1828,8 @@ pushed source commit.
 | Repository-owned participant skill; no Git notes | Task 10 |
 | Behavioral evaluation contract and preserved v1 safety | Task 11 |
 | Rehydrated v2 example ending CLOSED | Task 12 |
-| Four-destination transactional deployment and dual-root v1 gate | Task 13 |
-| Neutral-CWD verification and fresh-session discovery | Task 14 |
+| Four-destination deployment, dual-root v1 gate, and exact invalid-legacy acknowledgement | Task 13 |
+| Live-topic owner/tracker inventory, neutral-CWD verification, and fresh-session discovery | Task 14 |
 
 ## Plan Review Disposition
 
@@ -1787,6 +1853,18 @@ implementations can drift. This follows directly from the design's decision to f
 differential test can span the version boundary because the v2 validator rejects v1 topics by
 construction. The mitigation is Task 8's requirement that every preserved check have its own v2
 fixture rather than being assumed correct by inheritance.
+
+Second-round Opus review re-ran the frozen v1 suite at `360 passed, 0 failed`, independently
+confirmed the P6 rejection on Apple Git 2.50.1, and found the plan internally consistent apart from
+deployment preconditions. Its findings were resolved without adding, removing, or resequencing a
+task:
+
+| # | Finding | Resolution |
+| --- | --- | --- |
+| Q1 | A frozen-v1 validator exit 2 made the strict `CLOSED` gate permanently unreachable for an immutable malformed legacy record | Task 13 implements a repeatable machine-readable owner acknowledgement bound to clean record HEAD/tree and reproducible output digest; it cannot override valid non-`CLOSED`, v2, unavailable, or read-failure outcomes |
+| Q2 | Task 14 had not enumerated its live prerequisites or its self-referential v1 review topic | Task 14 now carries a live inventory with Vitaliy L and Beads `Work-5mjj.1`–`.4`, requires refresh for new topics, and closes the release-review topic before swap |
+| Q3 | The `CLOSED`-not-`IDLE` rule and demonstration-topic policy were unstated | The design and Task 14 explain that `IDLE` can accept a later v1 turn; demonstrations live outside live roots and names never bypass discovery |
+| Q4 | Plan file lists used line-number anchors that drift after earlier tasks edit the same manuals | Every manual target now names a stable section heading rather than a line number |
 
 ## Plan Self-Review Checklist
 

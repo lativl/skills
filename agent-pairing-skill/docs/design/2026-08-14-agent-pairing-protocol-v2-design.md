@@ -103,8 +103,17 @@ The current v1 validator is frozen as `scripts/validate-v1.sh`. Its existing fix
 suite remain a regression gate for historical topics. Historical v1 records are inspected only by
 an explicit v1 command. The v2 participant package does not join an open v1 topic.
 
-All open v1 topics must reach `CLOSED` before either live runtime installation is replaced. Source
-work and testing in this repository may proceed before that gate; deployment may not.
+Every v1 topic that the frozen validator can classify must reach exact `CLOSED` before either live
+runtime installation is replaced. `IDLE` is intentionally insufficient: it has no in-flight turn,
+but it can still accept a later v1 turn after the manuals have been swapped, leaving a v1 record
+under v2 operating instructions. Source work and testing in this repository may proceed before that
+gate; deployment may not.
+
+A historical v1 record that the frozen validator cannot classify is not silently treated as closed,
+and its committed bytes are never rewritten to make it pass. The only release path for such a
+record is the explicit legacy-invalid acknowledgement defined under *Deployment transaction*. The
+acknowledgement is an owner-audited quarantine decision for exact immutable evidence, not an
+override for a validating non-`CLOSED` topic.
 
 ## Participant acquisition
 
@@ -622,13 +631,50 @@ topics of both. A default covering only one runtime would let an open Codex v1 t
 was never enumerated by, which is fail-open on a stated safety precondition. A configured default
 root that does not exist is reported and skipped; an explicitly passed `--record-root` that does not
 exist is an error. Before deployment the installer enumerates every topic directly under each record
-root, selects the validator named by that topic's declared protocol version, and refuses the release
-if any discovered v1 topic is not `CLOSED`.
+root and selects the validator named by that topic's declared protocol version. Demonstration and
+fixture topics live under repository test data or temporary roots, never directly under a live
+runtime record root. Existing demonstrations already under a live root remain ordinary discovered
+topics until explicitly dispositioned; topic names never create an implicit exclusion.
+
+The v1 gate has exactly three record outcomes:
+
+1. A successful validation whose exact classification is `CLOSED` permits deployment.
+2. A successful validation with any other classification refuses deployment. No acknowledgement
+   can override this outcome.
+3. A frozen-v1 `--check` that successfully runs but exits 2 with deterministic violation output
+   refuses deployment unless one explicit `--legacy-invalid-ack ABSOLUTE_FILE` exactly matches the
+   topic and evidence. Validator execution failure, unavailable Git/worktree evidence, malformed
+   acknowledgement, v2 validation failure, and every unrecognized outcome refuse deployment and
+   cannot be acknowledged.
+
+The repeatable legacy-invalid acknowledgement is machine-readable and contains:
+
+```yaml
+ack_version: 1
+topic_path: CANONICAL_ABSOLUTE_PATH
+record_head: FULL_GIT_OBJECT_ID
+record_tree: FULL_GIT_OBJECT_ID
+validator_exit: 2
+validator_output_sha256: LOWERCASE_SHA256
+owner: OWNER_ID
+tracker_ref: DURABLE_TRACKER_ID
+reason: ONE_LINE_REASON
+acknowledged_at: RFC3339_UTC
+```
+
+The installer accepts it only when the record repository is clean, its current `HEAD` and
+`HEAD^{tree}` equal the file, a second frozen-v1 read reproduces exit 2 and the exact output digest,
+and no other acknowledgement names that topic. It prints the topic, owner, tracker, reason, pinned
+object IDs, validator-output digest, and acknowledgement-file digest before staging anything. The
+same facts and file digest are committed to the release-evidence document. A stale acknowledgement
+therefore fails closed after any record change, and an acknowledgement can never convert a valid
+open or idle topic into a permitted one.
 
 The installer:
 
 1. Refuses empty, relative, or filesystem-root source and destination paths.
-2. Refuses deployment while any discovered v1 topic is open.
+2. Refuses deployment while any discovered classifiable v1 topic is not `CLOSED`, or while an
+   invalid legacy topic lacks an exact owner-authorized acknowledgement.
 3. Validates both source skills and runs the full neutral-CWD suite.
 4. Stages all four packages beside their live destinations.
 5. Verifies every staged package before changing either runtime.
@@ -665,7 +711,9 @@ The v2 design is implemented only when all of these are true:
 13. Author-supplied report manifests detect stale or lossy capture.
 14. Verification failures cannot reject a snapshot until reproduced under the assigned profile.
 15. Review verdict mapping follows the approved severity policy.
-16. Both runtime roots receive the same verified package release or both are restored.
+16. Both runtime roots receive the same verified package release or both are restored; the live v1
+    gate permits exact `CLOSED` plus only exact owner-acknowledged invalid legacy evidence and never
+    permits a validating non-`CLOSED` or unavailable topic.
 17. All behavioral evaluations and automated suites pass from a neutral non-repository directory.
 
 ## Review disposition
@@ -684,8 +732,18 @@ this revision:
 | R4 | `receipt_commit_by_epoch` was checkable only against a mutable admission default, unlike `ack_due_epoch` | The intent materializes `receipt_commit_timeout_seconds` and repeats `admission_ref` |
 | R5 | The open-v1 deployment gate defaulted to one record root while the release replaced two runtimes | The default enumerates the record root of every runtime being written |
 
-No finding changed the state machine's shape, so the acceptance criteria and behavioral evaluation
-contract stand as written; only the automated validation contract gained cases.
+A second review round verified R1–R5, the v1 `360/0` baseline, and the rejected empty-`turns/`
+guard against Apple Git 2.50.1. It found one deployment blocker and two specification gaps:
+
+| # | Defect | Resolution |
+| --- | --- | --- |
+| R6 | A structurally invalid append-only v1 record could neither become `CLOSED` nor pass the strict gate | Added a narrowly scoped owner acknowledgement pinned to clean record HEAD/tree and reproducible validator-output digest; it cannot override valid non-`CLOSED`, v2, unavailable, or read-failure outcomes |
+| R7 | Live deployment prerequisites, including the release topic itself, were not materialized before the final task | The plan now inventories every live topic with an owner, durable tracker, and explicit pre-swap disposition |
+| R8 | `CLOSED`-rather-than-`IDLE` and treatment of demonstrations were underexplained | `IDLE` remains unsafe because it can accept a later v1 turn; examples live outside live record roots and names never create an exclusion |
+
+No finding changed the v2 state machine's shape or task sequence. The acknowledgement changes only
+the pre-deployment treatment of immutable, unclassifiable v1 evidence; the behavioral evaluation
+contract stands as written.
 
 ## Deferred work
 
