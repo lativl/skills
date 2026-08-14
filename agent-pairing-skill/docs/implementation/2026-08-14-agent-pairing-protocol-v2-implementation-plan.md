@@ -27,9 +27,9 @@ dispositioned inline: five corrections accepted and one rejected after local Git
 - `BLOCKING`, `GATE`, and `NONBLOCKING` are primary policy in v2.0; the verdict remains binary and the validator does not parse findings prose.
 - No background daemon, persistent monitor, parallel turn, multiple primary, cross-machine protocol, cryptographic report authentication, or v2.1 findings ledger is introduced.
 - Deployment treats Claude/Codex `agent-pairing` and Claude/Codex `pair-with-primary` as one four-destination release and restores all four on a detected failure.
-- Deployment permits only discovered v1 topics that are exactly `CLOSED`, plus structurally invalid
-  legacy records carrying an exact owner-authorized acknowledgement; valid non-`CLOSED` topics and
-  unavailable evidence always refuse.
+- Deployment permits only discovered v1 or v2 topics that are exactly `CLOSED`, plus structurally
+  invalid frozen-v1 records carrying an exact owner-authorized acknowledgement; valid
+  non-`CLOSED` topics and unavailable evidence always refuse.
 - Installed copies are outputs. Implementation changes only this repository until the deployment task passes its open-topic gate.
 - Every relative path and relative-path command in this plan is rooted at the Git repository root —
   the parent of `agent-pairing-skill/`, not `agent-pairing-skill/` itself. Run
@@ -1529,11 +1529,13 @@ open v1 topic only under Claude default refuses
 open v1 topic only under Codex default refuses
 closed v1 topics under both defaults permit install
 invalid v1 topic without acknowledgement refuses
-invalid v1 topic with exact clean-HEAD/tree/output-digest acknowledgement permits
+invalid v1 topic with exact clean-HEAD/tree/stderr-digest/liveness acknowledgement permits
 stale or duplicate acknowledgement refuses
 acknowledgement cannot override a validating non-CLOSED topic or a v2 violation
 validator execution, Git-read, or unavailable-evidence failure cannot be acknowledged
-v2 topic uses default v2 validator
+acknowledgement with nonempty stdout, empty stderr, empty-string digest, or missing/false liveness assertion refuses
+valid CLOSED v2 topic uses default v2 validator and permits install
+valid non-CLOSED v2 topic refuses and cannot be acknowledged
 source validation failure leaves all four old packages
 failure after first swap restores all four old packages
 failure during post-install validation restores all four old packages
@@ -1578,19 +1580,26 @@ deployment. Run the corresponding validator from the source package and implemen
 outcomes:
 
 ```text
-v1 check exits 0 with exact CLOSED                 permit
-v1 check exits 0 with any other/unverified output refuse; acknowledgement forbidden
-v1 check exits 2 with deterministic violations    refuse unless one exact acknowledgement matches
-v2 violation or any other validator/read outcome  refuse; acknowledgement forbidden
+v1/v2 check exits 0 with exact CLOSED              permit
+v1/v2 check exits 0 with any other/unverified      refuse; acknowledgement forbidden
+frozen-v1 check exits 2 with violations            refuse unless one exact acknowledgement matches
+v2 exit 2 or any other validator/read outcome      refuse; acknowledgement forbidden
 ```
 
 For an exit-2 v1 record, require one acknowledgement with exact `ack_version`, canonical topic
-path, clean `record_head`, `record_tree`, `validator_exit: 2`, lowercase output SHA-256, owner,
-tracker reference, one-line reason, and UTC timestamp. Re-run the frozen validator and require the
-same exit/output digest; reject dirty records, stale objects, duplicates, malformed values, and an
-acknowledgement naming any validating topic. Before staging, print every accepted acknowledgement
-and its own file SHA-256 with the bound owner/tracker/reason and record/validator evidence. No topic
-name or `demo` convention bypasses enumeration.
+path, clean `record_head`, `record_tree`, `validator_exit: 2`,
+`validator_stdout_byte_count: 0`, positive `validator_stderr_byte_count`, lowercase
+`validator_stderr_sha256`, owner, tracker reference, one-line reason, literal
+`no_live_participant: true`, non-empty durable `liveness_evidence_ref`, and UTC timestamp. Run the
+frozen validator with `LC_ALL=C` and `GIT_NO_REPLACE_OBJECTS=1`, capturing stdout and stderr
+separately without byte normalization. Require zero stdout, positive stderr, and SHA-256 over exact
+stderr bytes; reject the empty-string SHA
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. Re-run and require the same
+exit, stream byte counts, and stderr digest. Reject dirty records, stale objects, duplicates,
+malformed values, missing/false liveness assertions, and an acknowledgement naming any validating
+topic or any v2 topic. Before staging, print every accepted acknowledgement and its own file SHA-256
+with the bound owner/tracker/reason/liveness and record/stderr evidence. No topic name or `demo`
+convention bypasses enumeration.
 
 - [ ] **Step 5: Implement stage, manifest verification, swap, and rollback**
 
@@ -1615,9 +1624,12 @@ post-install validations and manifest comparisons pass.
 
 After every injected failure, assert all four old sentinel files and their hashes remain. Assert
 that accepted legacy-invalid acknowledgements are printed with their file/evidence digests, stale
-acknowledgements fail after either record or output changes, and no acknowledgement permits an
-otherwise classifiable non-`CLOSED` topic. After success, compare source and installed manifests
-byte-for-byte and run:
+acknowledgements fail after either record or canonical stderr evidence changes, and no
+acknowledgement permits an otherwise classifiable non-`CLOSED` topic. Assert stdout/stderr capture
+separately, reject the empty
+digest and missing/false liveness assertion, and cover both valid-closed-v2 permit and
+valid-non-`CLOSED`-v2 refusal. After success, compare source and installed manifests byte-for-byte
+and run:
 
 ```bash
 /bin/bash "$CLAUDE_ROOT/skills/agent-pairing/tests/run-tests.sh"
@@ -1741,12 +1753,17 @@ failure, owner, tracker, and disposition in release evidence. The inventory know
 
 Refresh this table rather than assuming it remains exhaustive. Any newly discovered topic gets its
 own owner, durable tracker, and disposition before the gate may pass. Demonstrations must live
-outside production record roots; names never exempt an existing topic.
+outside production record roots; names never exempt an existing topic. The version-neutral rule is
+owned by Vitaliy L and tracked by `Work-5mjj.5`: every future valid v2 topic must also be exact
+`CLOSED`; any successful non-`CLOSED` v2 classification refuses and cannot be acknowledged.
 
 If `Work-5mjj.4` approves acknowledgement, create the machine-readable YAML sidecar with the exact
 schema from the design. Bind it to a clean record `HEAD`, `HEAD^{tree}`, exit 2, and SHA-256 of the
-complete frozen-validator output; capture the acknowledgement file's own SHA-256 in release
-evidence. Commit and push that sidecar before using it as deployment input:
+exact positive stderr bytes from a canonical `LC_ALL=C`, `GIT_NO_REPLACE_OBJECTS=1` frozen-v1 run
+whose stdout is exactly empty. Record both stream byte counts, reject the empty-string SHA, require
+literal `no_live_participant: true` plus `liveness_evidence_ref`, and capture the acknowledgement
+file's own SHA-256 in release evidence. Commit and push that sidecar before using it as deployment
+input:
 
 ```bash
 git add agent-pairing-skill/docs/implementation/2026-08-14-agent-pairing-protocol-v2-legacy-invalid-ack.yaml
@@ -1755,10 +1772,11 @@ git pull --rebase
 git push origin "$(git rev-parse --abbrev-ref HEAD)"
 ```
 
-Run the installer preflight. Exact `CLOSED` permits. A validating non-`CLOSED` topic, v2 violation,
-unavailable evidence, validator/read failure, stale acknowledgement, or unacknowledged exit-2 v1
-record stops deployment. The explicit, exact acknowledgement path is part of the gate—not a live
-package edit or an implicit bypass.
+Run the installer preflight. Exact `CLOSED` permits for either protocol version. A validating
+non-`CLOSED` v1 or v2 topic, v2 violation, unavailable evidence, validator/read failure, stale
+acknowledgement, or unacknowledged exit-2 v1 record stops deployment. The explicit, exact
+acknowledgement path is frozen-v1-only and is part of the gate—not a live package edit or an
+implicit bypass.
 
 - [ ] **Step 6: Deploy the one verified release to both runtimes**
 
@@ -1790,8 +1808,9 @@ Use pair-with-primary. Explain only whether you read an uncommitted dispatch rec
 The first answer must select `owner-manual` without asking. The second must say committed receipt
 only and no Git notes. Record commands, output, installed paths, source commit, installer result,
 manifest hashes, the refreshed topic inventory, every tracker disposition, and every accepted
-legacy-invalid acknowledgement plus its record/output/file digests in the release-evidence document
-without secrets.
+legacy-invalid acknowledgement plus its record objects, zero-stdout/positive-stderr evidence,
+stderr and file digests, no-live-participant assertion, and liveness-evidence reference in the
+release-evidence document without secrets.
 
 - [ ] **Step 8: Commit and push release evidence**
 
@@ -1828,7 +1847,7 @@ pushed source commit.
 | Repository-owned participant skill; no Git notes | Task 10 |
 | Behavioral evaluation contract and preserved v1 safety | Task 11 |
 | Rehydrated v2 example ending CLOSED | Task 12 |
-| Four-destination deployment, dual-root v1 gate, and exact invalid-legacy acknowledgement | Task 13 |
+| Four-destination deployment, dual-root version-neutral gate, and exact invalid-v1 acknowledgement | Task 13 |
 | Live-topic owner/tracker inventory, neutral-CWD verification, and fresh-session discovery | Task 14 |
 
 ## Plan Review Disposition
@@ -1865,6 +1884,9 @@ task:
 | Q2 | Task 14 had not enumerated its live prerequisites or its self-referential v1 review topic | Task 14 now carries a live inventory with Vitaliy L and Beads `Work-5mjj.1`–`.4`, requires refresh for new topics, and closes the release-review topic before swap |
 | Q3 | The `CLOSED`-not-`IDLE` rule and demonstration-topic policy were unstated | The design and Task 14 explain that `IDLE` can accept a later v1 turn; demonstrations live outside live roots and names never bypass discovery |
 | Q4 | Plan file lists used line-number anchors that drift after earlier tasks edit the same manuals | Every manual target now names a stable section heading rather than a line number |
+| Q5 | `validator_output_sha256` did not identify a stream and frozen v1 writes violations only to stderr | The acknowledgement now binds zero stdout, positive exact stderr bytes, and stderr SHA-256 under a fixed environment; the empty-string digest is forbidden and smoke-tested |
+| Q6 | A successfully validated non-`CLOSED` v2 topic had no deployment outcome | Exact `CLOSED` is version-neutral; valid non-`CLOSED` v2 refuses, acknowledgements are v1-only, and implementation is tracked by Vitaliy L in `Work-5mjj.5` |
+| Q7 | An invalid-v1 acknowledgement asserted no participant-liveness fact | Literal `no_live_participant: true` and a durable `liveness_evidence_ref` are required, surfaced, and captured in release evidence |
 
 ## Plan Self-Review Checklist
 

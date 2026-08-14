@@ -636,16 +636,18 @@ fixture topics live under repository test data or temporary roots, never directl
 runtime record root. Existing demonstrations already under a live root remain ordinary discovered
 topics until explicitly dispositioned; topic names never create an implicit exclusion.
 
-The v1 gate has exactly three record outcomes:
+The gate applies these two version-neutral outcomes to every successfully validated topic:
 
 1. A successful validation whose exact classification is `CLOSED` permits deployment.
 2. A successful validation with any other classification refuses deployment. No acknowledgement
    can override this outcome.
-3. A frozen-v1 `--check` that successfully runs but exits 2 with deterministic violation output
-   refuses deployment unless one explicit `--legacy-invalid-ack ABSOLUTE_FILE` exactly matches the
-   topic and evidence. Validator execution failure, unavailable Git/worktree evidence, malformed
-   acknowledgement, v2 validation failure, and every unrecognized outcome refuse deployment and
-   cannot be acknowledged.
+
+A frozen-v1 `--check` that successfully runs but exits 2 with deterministic violation output
+refuses deployment unless one explicit `--legacy-invalid-ack ABSOLUTE_FILE` exactly matches the
+topic and evidence. This is the only acknowledgement-eligible outcome. V2 validation failure,
+validator execution failure, unavailable Git/worktree evidence, malformed acknowledgement, and
+every unrecognized outcome refuse deployment and cannot be acknowledged. Therefore a valid v1 or
+v2 topic permits only at exact `CLOSED`, and no acknowledgement ever applies to v2.
 
 The repeatable legacy-invalid acknowledgement is machine-readable and contains:
 
@@ -655,18 +657,31 @@ topic_path: CANONICAL_ABSOLUTE_PATH
 record_head: FULL_GIT_OBJECT_ID
 record_tree: FULL_GIT_OBJECT_ID
 validator_exit: 2
-validator_output_sha256: LOWERCASE_SHA256
+validator_stdout_byte_count: 0
+validator_stderr_byte_count: POSITIVE_INTEGER
+validator_stderr_sha256: LOWERCASE_SHA256
 owner: OWNER_ID
 tracker_ref: DURABLE_TRACKER_ID
 reason: ONE_LINE_REASON
+no_live_participant: true
+liveness_evidence_ref: DURABLE_EVIDENCE_REFERENCE
 acknowledged_at: RFC3339_UTC
 ```
 
 The installer accepts it only when the record repository is clean, its current `HEAD` and
-`HEAD^{tree}` equal the file, a second frozen-v1 read reproduces exit 2 and the exact output digest,
-and no other acknowledgement names that topic. It prints the topic, owner, tracker, reason, pinned
-object IDs, validator-output digest, and acknowledgement-file digest before staging anything. The
-same facts and file digest are committed to the release-evidence document. A stale acknowledgement
+`HEAD^{tree}` equal the file, `no_live_participant` is the exact literal `true`, its liveness evidence
+reference is non-empty and durable, and no other acknowledgement names that topic. Validator
+evidence is captured canonically by running frozen v1 `--check` with `LC_ALL=C` and
+`GIT_NO_REPLACE_OBJECTS=1`, stdout and stderr in separate byte-preserving captures. Exit must be 2,
+stdout must be exactly zero bytes, stderr must have a positive byte count, and
+`validator_stderr_sha256` is the lowercase SHA-256 of the exact stderr bytes including final-newline
+state. The empty-string SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` is forbidden. A second frozen-v1
+run must reproduce the exit, zero stdout, stderr byte count, and stderr digest exactly.
+
+Before staging, the installer prints the topic, owner, tracker, reason, liveness assertion/evidence,
+pinned object IDs, validator stderr byte count/digest, and acknowledgement-file digest. The same
+facts and file digest are committed to the release-evidence document. A stale acknowledgement
 therefore fails closed after any record change, and an acknowledgement can never convert a valid
 open or idle topic into a permitted one.
 
@@ -711,9 +726,9 @@ The v2 design is implemented only when all of these are true:
 13. Author-supplied report manifests detect stale or lossy capture.
 14. Verification failures cannot reject a snapshot until reproduced under the assigned profile.
 15. Review verdict mapping follows the approved severity policy.
-16. Both runtime roots receive the same verified package release or both are restored; the live v1
-    gate permits exact `CLOSED` plus only exact owner-acknowledged invalid legacy evidence and never
-    permits a validating non-`CLOSED` or unavailable topic.
+16. Both runtime roots receive the same verified package release or both are restored; every valid
+    v1 or v2 topic must be exact `CLOSED`, while only frozen-v1 exit-2 evidence may use the exact
+    owner acknowledgement, and no validating non-`CLOSED` or unavailable topic may pass.
 17. All behavioral evaluations and automated suites pass from a neutral non-repository directory.
 
 ## Review disposition
@@ -740,6 +755,9 @@ guard against Apple Git 2.50.1. It found one deployment blocker and two specific
 | R6 | A structurally invalid append-only v1 record could neither become `CLOSED` nor pass the strict gate | Added a narrowly scoped owner acknowledgement pinned to clean record HEAD/tree and reproducible validator-output digest; it cannot override valid non-`CLOSED`, v2, unavailable, or read-failure outcomes |
 | R7 | Live deployment prerequisites, including the release topic itself, were not materialized before the final task | The plan now inventories every live topic with an owner, durable tracker, and explicit pre-swap disposition |
 | R8 | `CLOSED`-rather-than-`IDLE` and treatment of demonstrations were underexplained | `IDLE` remains unsafe because it can accept a later v1 turn; examples live outside live record roots and names never create an exclusion |
+| R9 | `validator_output_sha256` did not name a stream; frozen v1 writes violations only to stderr, so a stdout implementation would bind the empty-string digest | Canonical evidence is exit 2, zero stdout bytes, positive stderr bytes, and SHA-256 over exact stderr bytes under a fixed environment; the empty digest is forbidden |
+| R10 | A successfully validated non-`CLOSED` v2 topic matched no deployment outcome | Exact `CLOSED` is required for every valid v1 or v2 topic; acknowledgements remain v1-exit-2-only |
+| R11 | An invalid-record acknowledgement did not explicitly assert participant liveness | The schema requires literal `no_live_participant: true` plus a durable liveness-evidence reference |
 
 No finding changed the v2 state machine's shape or task sequence. The acknowledgement changes only
 the pre-deployment treatment of immutable, unclassifiable v1 evidence; the behavioral evaluation
