@@ -25,7 +25,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 #                cannot produce a valid V1 topic by construction, so validating them with the v1
 #                validator asserted the opposite of the compatibility boundary
 #   +1   Task 5  templates/ack.md               referenced by SKILL.md
-V1_EXPECTED_PASSES=360
+#   +2   review  templates/result-capture.md and templates/fence-initiated.md, now referenced by
+#                SKILL.md's record-grammar table. Both existed but no manual pointed at them, so an
+#                agent at the capture or fence step had no template to instantiate.
+V1_EXPECTED_PASSES=362
 
 V1_OUT="$(mktemp -t agent-pairing-v1-gate)" \
   || { echo "FATAL: cannot allocate the v1 gate output file" >&2; exit 3; }

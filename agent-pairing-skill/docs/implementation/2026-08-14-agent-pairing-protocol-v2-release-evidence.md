@@ -226,6 +226,44 @@ valid topic; only an agent reading the manual and choosing could expose it.
 write or update Git notes; the primary is the record's sole writer." Both v1 defects named and
 refused, unprompted.
 
+## Whole-branch review
+
+Two independent reviews ran against the finished branch.
+
+**Codex — reject**, four findings, all reproduced and fixed: two installer rollback flaws (a
+space-containing path split by word-splitting so rollback ran `rm -rf` on a path nobody named; backup
+slots derived from a root's basename colliding when two roots shared one), a fence able to precede
+the receipt whose timeout it claimed, and `AP_INSTALL_SKIP_SUITES` being an unrestricted production
+bypass. It also correctly flagged that acceptance criterion 12 was overclaimed — see below.
+
+**Fable — accept with fixes**, and its blocker was the most serious defect found in the whole
+project: **a `VERIFIED` result committed after a fence dissolved the boundary**, advanced the
+accepted SHA past it, and — because `CLOSE_SHA_MISMATCH` compares a close against the same fold that
+result had just moved — could carry a fenced attempt all the way to `CLOSED`. The same laundering
+pattern this branch had already closed twice, arriving through the one seam left open. Fixed: after a
+fence commits, an `ack` or `result-capture` for that attempt is a violation (post-fence evidence
+belongs in a `late` record), and the terminal status is restricted to `ABORTED` or `REJECTED`.
+
+Fable also found that the RUNBOOK's install section had never been reconciled with the Task 13
+installer — it still documented a hand-rolled, ungated, single-package procedure that an agent would
+have followed literally, performing exactly the deploy the design's criterion 16 exists to prevent.
+Rewritten.
+
+Its mutation testing found the real gap behind these: deleting `LINK_TUPLE_MISMATCH` left the entire
+v2 suite green. That rule now has a fixture, and the sweep of unasserted codes is recorded as
+follow-up work below.
+
+## Follow-up work, not done in this release
+
+- **Violation-code coverage sweep.** Of 94 `v2_fail` codes, roughly 37 are never asserted by name.
+  Not all are uncovered — several fire through sibling assertions — but at least one
+  (`LINK_TUPLE_MISMATCH`) was provably uncovered and is now fixed. The rest should be swept: add a
+  one-defect fixture per reachable code, and delete any that are provably unreachable.
+- **`tests/v2/live.sh`** appears in no plan task or file-responsibility map. It is sound and keeps the
+  gate offline, but it is an unrecorded structural addition.
+- **Unknown front-matter keys** on records are tolerated. Required-key lists make dangerous
+  misspellings fail closed, so this is a nit rather than a hole.
+
 ## Known limits of what the records can prove
 
 Two acceptance criteria are worth stating precisely, because the honest scope is narrower than a

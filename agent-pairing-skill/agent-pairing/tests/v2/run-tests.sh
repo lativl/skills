@@ -103,6 +103,11 @@ if v2_group common; then
     common-defects/unknown-kind UNKNOWN_KIND
   v2_expect_only_violation "working-tree-only record is ignored then reported as residue" \
     common-defects/uncommitted-record UNCOMMITTED_RESIDUE
+  # A record whose tuple disagrees with the assignment it cites. Every reference resolves, so only
+  # the tuple comparison catches it -- and mutation testing showed deleting that comparison left the
+  # whole suite green, which is exactly the "assumed correct by inheritance" the plan warned about.
+  v2_expect_only_violation "a record's tuple must match the assignment it cites" \
+    common-defects/link-tuple-mismatch LINK_TUPLE_MISMATCH
 
   # Regression: each record must be staged to its OWN file. `v2_stage_committed` runs inside `$( )`,
   # so a counter-derived slot name never increments in the parent — every record staged over the
@@ -521,6 +526,11 @@ if v2_group classification; then
   # than its own receipt fences a delivery the record had not yet made durable.
   v2_expect_live_violation "a fence must follow the receipt it fences" \
     fence-before-dispatch FENCE_ORDER
+  # THE boundary rule. Without it a post-fence capture plus a VERIFIED result advanced the accepted
+  # SHA past the fence, and a close naming that SHA matched the record-derived fold by construction
+  # -- carrying a fenced attempt all the way to CLOSED.
+  v2_expect_live_violation "nothing may continue an attempt after its fence" \
+    verified-after-fence FENCE_SUPERSEDED
 
   # The design's OWN authorized lifecycle, which was unrecordable: a clean stationary fenced
   # ack-timeout attempt terminates ABORTED: ack-timeout with ack_ref: null, because such an attempt

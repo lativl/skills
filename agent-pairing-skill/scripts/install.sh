@@ -201,12 +201,24 @@ while IFS= read -r root; do
   say "enumerating record root: $root"
   for topic in "$root"/*; do
     [ -d "$topic" ] || continue
-    [ -f "$topic/TOPIC.md" ] || continue
-    TOPICS_SEEN=$((TOPICS_SEEN + 1))
     slug="$(basename "$topic")"
 
-    # The topic's own declared version selects its validator. A missing version is historical v1.
-    ver="$(awk '/^---$/ { c++; next } c == 1 && $1 == "protocol_version:" { print $2; exit } c >= 2 { exit }' "$topic/TOPIC.md")"
+    # A directory under a record root is a TOPIC unless it is provably not one. Skipping on a missing
+    # working-tree TOPIC.md meant deleting that one file removed a topic from the gate entirely,
+    # records and all — the gate would then proceed over a topic nobody had classified.
+    if ! git -C "$topic" rev-parse --git-dir >/dev/null 2>&1; then
+      # Not a repository at all: it cannot hold records, so it is not a topic.
+      [ -n "$(ls -A "$topic" 2>/dev/null)" ] \
+        && die "'$slug' sits under a record root but is not a Git repository; move it out or make it a topic"
+      continue
+    fi
+    TOPICS_SEEN=$((TOPICS_SEEN + 1))
+
+    # The version is read from the COMMITTED TOPIC.md, like everything else the protocol trusts. A
+    # working-tree read would let an uncommitted edit choose which validator judges the topic.
+    git -C "$topic" cat-file -e HEAD:TOPIC.md 2>/dev/null \
+      || die "topic '$slug' has no committed TOPIC.md; it cannot be classified and must not be enumerated by a gate it cannot satisfy"
+    ver="$(git -C "$topic" show HEAD:TOPIC.md 2>/dev/null | awk '/^---$/ { c++; next } c == 1 && $1 == "protocol_version:" { print $2; exit } c >= 2 { exit }')"
     case "$ver" in
       '') v="$VALIDATE_V1"; vlabel="frozen v1" ;;
       1)  v="$VALIDATE_V1"; vlabel="frozen v1" ;;

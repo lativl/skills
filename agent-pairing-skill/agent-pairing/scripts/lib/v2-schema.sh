@@ -1010,6 +1010,36 @@ v2_check_fences() {
     # fails to resolve must be a violation — never a `continue`. Skipping made a fence with a
     # dangling dispatch_ref and a fabricated due_epoch classify FENCING at exit 0, which is the
     # boundary's only checkable property bypassed entirely.
+    # --- nothing may dissolve the boundary ------------------------------------------------------------
+    # The fence is the mechanism this protocol is built around, and until now nothing restricted what
+    # could FOLLOW one. A post-fence result-capture plus a VERIFIED result validated at exit 0 and
+    # advanced the accepted SHA past the fence -- and because CLOSE_SHA_MISMATCH compares a close
+    # against the same fold that result just moved, a close naming the laundered SHA matches by
+    # construction and the topic reaches CLOSED. That is the exact laundering this branch already
+    # closed twice, arriving through the one seam left open.
+    #
+    # After the fence commits, late evidence is an OBSERVATION: it belongs in a `late` record, which
+    # is preserved and changes nothing. An `ack` or `result-capture` committed after the boundary is
+    # not an observation, it is the attempt continuing.
+    while read -r v2_fk_s6 v2_fk_k6 v2_fk_n6 v2_fk_f6; do
+      [ -n "${v2_fk_s6:-}" ] || continue
+      [ "$v2_fk_s6" \> "$v2_fk_seq" ] || continue
+      [ "$(v2_fm_get "$v2_fk_f6" turn_id)" = "$v2_fk_t" ] || continue
+      [ "$(v2_fm_get "$v2_fk_f6" attempt_id)" = "$v2_fk_a" ] || continue
+      case "$v2_fk_k6" in
+        ack|result-capture)
+          v2_fail FENCE_SUPERSEDED "$v2_fk_n6" "a $v2_fk_k6 record follows the fence at $v2_fk_seq; evidence arriving after a committed boundary is a late observation, not the attempt continuing" ;;
+        result)
+          # A fenced attempt did not finish. It may be ABORTED once termination is confirmed, or
+          # REJECTED if something landed -- never VERIFIED, which would move the accepted SHA to work
+          # the boundary says was never acknowledged as delivered.
+          case "$(v2_fm_get "$v2_fk_f6" status)" in
+            ABORTED|REJECTED) ;;
+            *) v2_fail FENCE_SUPERSEDED "$v2_fk_n6" "a fenced attempt terminates ABORTED or REJECTED, never $(v2_fm_get "$v2_fk_f6" status); the fence at $v2_fk_seq says delivery was never acknowledged" ;;
+          esac ;;
+      esac
+    done <"$V2_SORTED"
+
     v2_fk_tr="$(v2_fm_get "$v2_fk_file" trigger)"
     v2_fk_due="$(v2_fm_get "$v2_fk_file" due_epoch)"
     case "$v2_fk_tr" in

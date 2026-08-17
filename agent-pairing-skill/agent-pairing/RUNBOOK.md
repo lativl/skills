@@ -326,100 +326,102 @@ worktree admin entry. Resume re-confirms it with `git worktree list`, which is w
 
 ## Installing and updating this package
 
-Install is a copy. There is nothing to build and no state outside the package.
-
-**There are TWO installation roots on this machine**, because two runtimes must be able to load the
-skill and each reads its own directory:
-
-| Runtime | `<skills-root>` | Package installed at |
-|---|---|---|
-| Claude | `$HOME/.claude/skills` | `$HOME/.claude/skills/agent-pairing` |
-| Codex | `$HOME/.codex/skills` | `$HOME/.codex/skills/agent-pairing` |
-
-**Any change to this package means re-running the block below for BOTH roots.** Updating one leaves
-the other on the old version, and the two runtimes will then be following different manuals for the
-same topic — the failure mode is silent, because each side's copy looks internally consistent.
-
-**Update must be atomic**, because a half-copied package is a manual with missing steps that an
-agent will still try to follow. Stage the new version beside the live one, verify it there, and swap
-by rename — with the previous installation kept aside until the installed copy has proven itself:
+**Use the installer. Do not copy files by hand.**
 
 ```bash
-set -eu
-SRC=<absolute path to the new skills/agent-pairing>
-# A cwd unrelated to the source repo, so a repo-relative assumption cannot pass unnoticed.
-# It must NOT be a git repo (see the note below): a git-repo cwd is exactly what once hid a
-# cwd-dependent bug in example/rehydrate.sh from this smoke. So: NEUTRAL="$(mktemp -d)" — no init.
-NEUTRAL=<scratch non-repo dir>
-
-require_root() { # <name> <value>   — `set -u` does NOT reject a set-but-EMPTY variable, and an
-  case "${2:-}" in                  #   empty root would put the install at /skills/agent-pairing,
-    "")  echo "$1 is empty — refusing to derive install paths" >&2; exit 3 ;;   # which this block
-    /)   echo "$1 is / — refusing to install at the filesystem root" >&2; exit 3 ;; # then creates,
-    /*)  ;;                                                                    #   swaps and later
-    *)   echo "$1 is not absolute ($2) — refusing" >&2; exit 3 ;;              #   deletes -rf.
-  esac; }
-
-install_one() { # <root>   — run it twice: install_one "$HOME/.claude"; install_one "$HOME/.codex"
-  require_root HOME "${HOME:-}"; require_root ROOTDIR "${1:-}"
-  DEST="$1/skills/agent-pairing"; PARENT="$1/skills"
-  mkdir -p "$PARENT"
-  # Unchecked, STAGE="" makes NEW="/agent-pairing", BACKUP="/previous", and the success branch's
-  # `rm -rf "$BACKUP" "$STAGE"` a delete at the filesystem root.
-  STAGE="$(mktemp -d "$PARENT/.agent-pairing.install.XXXXXX")" || { echo "mktemp -d under $PARENT failed" >&2; exit 3; }
-  [ -n "$STAGE" ] && [ -d "$STAGE" ] || { echo "mktemp produced no directory" >&2; exit 3; }
-  case "$STAGE" in "$PARENT"/.agent-pairing.install.?*) ;; *) echo "refusing to stage in $STAGE" >&2; exit 3;; esac
-  NEW="$STAGE/agent-pairing"; mkdir "$NEW"
-  ( cd "$SRC" && tar --exclude='./pressure' -cf - . ) | ( cd "$NEW" && tar -xf - )
-  [ ! -d "$NEW/pressure" ] || { echo "pressure tree leaked into install" >&2; exit 1; }
-  ( cd "$NEUTRAL" && /bin/bash "$NEW/tests/run-tests.sh" ) || { echo "staged suite failed; nothing swapped" >&2; exit 1; }
-
-  BACKUP="$STAGE/previous"
-  [ ! -e "$DEST" ] || mv "$DEST" "$BACKUP"
-  if mv "$NEW" "$DEST" && ( cd "$NEUTRAL" && /bin/bash "$DEST/tests/run-tests.sh" ) && [ ! -d "$DEST/pressure" ]; then
-    rm -rf "$BACKUP" "$STAGE"
-  else
-    [ ! -e "$DEST" ] || mv "$DEST" "$STAGE/failed"
-    [ ! -e "$BACKUP" ] || mv "$BACKUP" "$DEST"
-    echo "install smoke failed; previous installation restored" >&2
-    exit 1
-  fi; }
+/bin/bash <repo>/agent-pairing-skill/scripts/install.sh \
+  --source     <repo>/agent-pairing-skill \
+  --claude-root ~/.claude \
+  --codex-root  ~/.codex
 ```
 
-Notes:
+That is the whole procedure. Everything below explains what it does and why doing it by hand is
+unsafe.
 
-- **Do the roots one at a time and verify each before starting the next.** They are independent: if
-  the second fails, say "the first is installed and the second is not" rather than unwinding a good
-  installation. The rollback inside the block is per-root and only ever restores *that* root.
-- **On a first install there is nothing to roll back.** With no previous installation, `BACKUP` is
-  never created and the restore branch never runs. Do not report that as "rollback verified".
-- The stage and the destination must be on the **same filesystem**, or the final `mv` is a copy and
-  stops being atomic. `mktemp -d` under `$PARENT` guarantees this.
-- The tests **do** ship, because the second smoke runs them from the installed path — that is what
-  catches a path assumption that only holds inside the source repo. `pressure/` does not ship (and
-  is not present in the built package at all); the assertions stay as a guard.
-- **`$NEUTRAL` must NOT be a git repo, and the suite must be green from it.** The suite is
-  cwd-independent: `example/rehydrate.sh` gives `git bundle verify` an explicit repository context
-  (`git -C <staging repo>`) instead of relying on the caller's cwd. Measured on this host after that
-  fix: **360 passed, 0 failed** from the source tree, from an installed `<skills-root>/agent-pairing`
-  and from `/` alike. Running the smoke from inside a git repo is what let the earlier cwd-dependent
-  version pass here while failing for a reader who did the obvious thing — `cd` into the installed
-  skill and run its tests — and got **355 passed, 5 failed** with the misleading message
-  `work-repo.bundle is corrupt` about a byte-identical bundle. Use a plain `mktemp -d`, and if the
-  count is not 360/0, stop: something is cwd-dependent again.
-- After installing, verify per root: `head -5 <root>/skills/agent-pairing/SKILL.md` (front matter),
-  the suite count from the installed path, `find . -type f | sort` matching the source, and
-  `example/rehydrate.sh --print-topic` → `scripts/validate.sh --check <topic>` classifying `CLOSED`
-  → `--clean`. The example pins **absolute** `/tmp` paths, which both roots share, so run that last
-  check sequentially with `--clean` in between.
-- Whether the runtime actually *lists* the skill can only be confirmed on the **next** session start
-  of that runtime — a live listing cannot be checked from inside the session that installed it.
-- Never edit the live package in place while a topic is open.
-- Updating this package never touches an open topic: record repos and worktrees live outside it, and
-  their absolute paths are pinned in each `TOPIC.md`.
-- If you want a rollback copy that outlives a successful install, take one yourself before running
-  the block (`cp -R "$DEST" "$DEST.old.$$"`); the block deletes its own backup once the installed
-  copy passes its smoke.
+### Four destinations, one release
+
+The installer writes **all four** packages together:
+
+```text
+~/.claude/skills/agent-pairing        ~/.claude/skills/pair-with-primary
+~/.codex/skills/agent-pairing         ~/.codex/skills/pair-with-primary
+```
+
+They ship together or not at all. A hand copy that updates one runtime, or updates `agent-pairing`
+without `pair-with-primary`, leaves a primary on one protocol version and a participant on another —
+each following rules the other does not implement, with nothing in the record saying so. That is the
+state this whole protocol exists to make impossible.
+
+### What it refuses, before it touches anything
+
+1. **Empty, relative, whitespace-only, `/`, or `..`-escaping paths** — every one of those would make
+   a later `mv` or `rm -rf` act on a path nobody chose.
+2. **Any topic that is not exact `CLOSED`.** It enumerates every topic directly under each record
+   root and runs the validator that topic's own declared version selects. `IDLE` refuses too: it has
+   no in-flight turn, but it can still accept a later v1 turn, which would leave a v1 record being
+   worked under v2 manuals.
+3. **Anything it cannot classify**, unless you supply an exact acknowledgement — see below.
+
+With no `--record-root`, it defaults to the record root of **every runtime it is about to write**
+(`~/.claude/agent-pairing` and `~/.codex/agent-pairing`). A default covering only one runtime would
+let an open topic in the other pass a check it was never enumerated by. A configured default that
+does not exist is reported and skipped; an explicitly passed `--record-root` that does not exist is
+an error, because somebody asserted it.
+
+### Then it stages, swaps, and verifies
+
+Source gate → stage both packages → verify the **staged** copies → save all four previous
+installations → swap all four → validate both installed roots → verify byte-and-mode parity across
+runtimes → only then delete the backups.
+
+**Any failure after the first swap restores all four previous packages.** Each individual rename is
+atomic; the cross-root operation is transaction-*like*, so the swap window is kept as small as
+possible and a detected failure restores a coherent previous release rather than a mixed one.
+
+### Closing a topic that blocks the gate
+
+If the gate refuses, close the topic properly — do not delete records and do not edit them. For an
+attempt that was dispatched and never returned: owner question → owner answer
+(`dispatch-termination-confirmed`, carrying the evidence) → `ABORTED: terminated-before-result`
+citing that answer → close → retire the worktree → **then** render `THREAD.md`.
+
+That order matters: the close postconditions must be *satisfied* before the render that proves them,
+or `THREAD.md` will not say `CLOSED` and the topic stays `CLOSING`.
+
+For a record the frozen validator cannot classify at all, there are exactly two options, and
+rewriting its committed bytes is not one of them:
+
+- **Archive it** outside the live record root (`~/.claude/agent-pairing-archive/`). Moving a
+  directory changes no committed byte; verify by comparing `HEAD` and `HEAD^{tree}` before and after.
+- **Acknowledge it** with `--legacy-invalid-ack FILE`. This is the only acknowledgement-eligible
+  outcome in the entire gate: a frozen-v1 exit 2 with zero stdout, positive stderr, and a stderr
+  digest that reproduces. The acknowledgement pins the clean record `HEAD` and tree, both stream byte
+  counts, that digest, an owner, a durable tracker reference, and the literal
+  `no_live_participant: true` with durable liveness evidence. It goes stale the moment the record
+  changes. It can never permit a topic that classified and merely said something inconvenient.
+
+### Verifying an install
+
+```bash
+cd /private/tmp                                     # a neutral, non-repository directory
+/bin/bash ~/.claude/skills/agent-pairing/tests/run-tests.sh
+/bin/bash ~/.codex/skills/agent-pairing/tests/run-tests.sh
+```
+
+The gate prints one summary per suite — the frozen v1 regression, the v2 validator, the manual
+contract, the behavioral artifacts, the participant contract — and finally replays the shipped
+example to `CLOSED`. **Every suite must end `0 failed`.** The v1 count is pinned exactly, with a
+ledger in `tests/run-tests.sh` explaining each increment, so a *lost* v1 case is as loud as an added
+one.
+
+To exercise the installer itself without touching a real installation:
+
+```bash
+/bin/bash <repo>/agent-pairing-skill/tests/install-smoke.sh
+```
+
+It builds temporary runtime homes, drives every guard and both rollback injection points, and proves
+the previous release survives byte-for-byte through each failure.
 
 ### Who can load this skill, and who still needs the onboarding text
 

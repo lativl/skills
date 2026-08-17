@@ -519,6 +519,37 @@ recorded_at: 2026-08-14T12:30:00Z
 Committed after the result that already asserted the timeout.
 FENCE2
       ;;
+    verified-after-fence)
+      # A capture and a VERIFIED result committed AFTER the fence. Every reference resolves and the
+      # arithmetic is consistent, so only a boundary rule catches it -- and without one the accepted
+      # SHA advances past the fence, and a close naming that SHA matches the fold by construction.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      v2_live_ack "$T" live 0011 1130 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md 0010-t0002-a01-dispatch.md job-2 tok-2 "$C1"
+      cat > "$T/turns/0012-t0002-a01-fence-initiated.md" <<FENCE4
+---
+protocol_version: 2
+record_seq: 0012
+kind: fence-initiated
+topic_id: live
+turn_id: 0002
+attempt_id: 01
+turn_kind: NORMAL
+trigger: work-timeout
+assignment_ref: 0008-t0002-a01-assignment.md
+dispatch_ref: 0010-t0002-a01-dispatch.md
+ack_ref: 0011-t0002-a01-ack.md
+job_id: job-2
+due_epoch: $(( 1130 + 3600 ))
+observed_epoch: $(( 1130 + 3700 ))
+recorded_epoch: $(( 1130 + 3700 ))
+recorded_at: 2026-08-14T13:00:00Z
+---
+The work budget expired.
+FENCE4
+      v2_live_capture "$T" live 0013 4900 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md 0011-t0002-a01-ack.md 'Finished, honest.'
+      v2_live_result "$T" live 0014 4910 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md 0011-t0002-a01-ack.md 0013-t0002-a01-result-capture.md VERIFIED '' 3333333333333333333333333333333333333333 ;;
     fence-before-dispatch)
       # A fence committed BEFORE the receipt whose budget it claims expired. Every reference
       # resolves and the stored arithmetic is consistent, so only an ordering rule catches it -- and

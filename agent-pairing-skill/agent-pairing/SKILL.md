@@ -870,12 +870,16 @@ front-matter `record_seq` is authoritative and the filename prefix is a zero-pad
 `record_seq` = the highest committed one + 1, and the file is written **and committed in one
 durable step**. A record that cannot be committed fails closed: no dispatch, no transition.
 
-| Kind | Template |
-|---|---|
-| `assignment` | `templates/assignment.md` |
-| `intent` | `templates/intent.md` |
-| `dispatch` | `templates/dispatch.md` |
-| `result` | `templates/result.md` |
+| Kind | Template | Written when |
+|---|---|---|
+| `admission` | `templates/admission.md` | the participant is confirmed present (OPEN step 11) |
+| `assignment` | `templates/assignment.md` | a turn begins |
+| `intent` | `templates/intent.md` | before dispatch, so "no intent" proves "never dispatched" |
+| `dispatch` | `templates/dispatch.md` | the receipt; committed before any wake notification |
+| `ack` | `templates/ack.md` | the participant's acknowledgement is captured |
+| `result-capture` | `templates/result-capture.md` | the report bytes are committed, before interpreting them |
+| `fence-initiated` | `templates/fence-initiated.md` | a bound expired, **before** asking the transport to terminate |
+| `result` | `templates/result.md` | the turn terminates |
 | `late` | `templates/late.md` |
 | `owner-question` | `templates/owner-question.md` |
 | `owner-answer` | `templates/owner-answer.md` |
