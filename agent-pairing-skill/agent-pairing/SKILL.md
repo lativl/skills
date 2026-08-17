@@ -123,8 +123,15 @@ is one question with a bounded answer, and the cost of guessing wrong is an admi
 describing a pairing that did not happen — which then has to be superseded by a new admission,
 because admissions are append-only.
 
-`participant_selection_source` is `initial-prompt` when the request settled it and `owner-answer`
-when you had to ask. Ask **once**: a second question about the same choice is a stall, and a
+`participant_selection_source` records **whether you had to ask**, not who supplied the fact:
+
+- `initial-prompt` — the opening request settled it and you did not ask. This is the value even
+  though the owner is the one who said it; every request comes from the owner, so "the owner told
+  me" does not distinguish the two cases.
+- `owner-answer` — the request was absent or contradictory, you asked the selection question, and
+  the answer settled it.
+
+The test is simply: **did you ask?** If no, it is `initial-prompt`. Ask **once**: a second question about the same choice is a stall, and a
 question asked when the request already answered it is noise. Both values go into `TOPIC.md` at
 step 4 and are never edited afterwards.
 
