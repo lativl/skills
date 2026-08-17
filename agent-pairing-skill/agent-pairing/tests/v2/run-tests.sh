@@ -517,6 +517,10 @@ if v2_group classification; then
   # stage entirely while claiming the owner materialized it.
   v2_expect_live_violation "a receipt claiming owner-answer provenance must cite it" \
     receipt-claims-owner-answer MISSING_KEY
+  # Resolving a reference and checking arithmetic is not ordering. A fence at a lower record_seq
+  # than its own receipt fences a delivery the record had not yet made durable.
+  v2_expect_live_violation "a fence must follow the receipt it fences" \
+    fence-before-dispatch FENCE_ORDER
 
   # The design's OWN authorized lifecycle, which was unrecordable: a clean stationary fenced
   # ack-timeout attempt terminates ABORTED: ack-timeout with ack_ref: null, because such an attempt
@@ -684,7 +688,7 @@ if v2_group templates; then
            -e 's|{{ARTIFACT_REF}}|artifacts/t0001-a01/report.md|' \
            -e "s/{{AUTHOR_BYTE_COUNT}}/$v2_bc/" -e "s/{{AUTHOR_SHA256}}/$v2_sh/" \
            -e "s/{{OBSERVED_BYTE_COUNT}}/$v2_bc/" -e "s/{{OBSERVED_SHA256}}/$v2_sh/" \
-           -e 's/{{TRAILING_NEWLINE}}/present/' -e 's/{{CAPTURED_EPOCH}}/1050/' \
+           -e 's/{{TRAILING_NEWLINE}}/present/' -e 's/{{REPORT_CHANNEL}}/human-relay/' -e 's/{{CAPTURED_EPOCH}}/1050/' \
            "$v2_tpl/result-capture.md" >"$v2_t/turns/0006-t0001-a01-result-capture.md"
 
     v2_sub -e 's/{{RECORD_SEQ}}/0007/' -e 's/{{RECORDED_EPOCH}}/1060/' \

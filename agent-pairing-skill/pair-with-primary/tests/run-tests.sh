@@ -107,7 +107,10 @@ require "the ACK declares its evidence class" "ack_evidence_class"
 require "the visible preflight reports an observed HEAD" "observed_head"
 require "the visible preflight reports cleanliness" "preflight_clean"
 require "the invisible preflight binds the relay base" "relayed_base_sha"
-require "the report uses the admitted channel" "report_channel"
+# Presence of the WORD proves nothing -- it appears in any sentence mentioning the field. Require the
+# operative instruction: the admitted channel is the only path, and Git notes are refused by name.
+require "the report uses the admitted channel" "admitted \`report_channel\`"
+require "no other channel is permitted" "never by any other ref update"
 require "the report manifest carries a byte count" "byte_count"
 require "the report manifest carries a digest" "shasum -a 256"
 require "the report manifest declares its encoding" "encoding: utf-8"

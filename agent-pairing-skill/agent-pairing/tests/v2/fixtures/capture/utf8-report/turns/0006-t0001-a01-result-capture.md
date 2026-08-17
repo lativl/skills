@@ -17,6 +17,7 @@ author_sha256: bae549b7bf6775b2cab91b3c3fb7bdee5713074fcf37dd56584b23e0a0669473
 observed_byte_count: 22
 observed_sha256: bae549b7bf6775b2cab91b3c3fb7bdee5713074fcf37dd56584b23e0a0669473
 encoding: utf-8
+report_channel: human-relay
 trailing_newline: present
 captured_epoch: 1050
 ---

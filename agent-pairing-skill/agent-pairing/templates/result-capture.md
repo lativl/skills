@@ -16,6 +16,7 @@ observed_byte_count: {{OBSERVED_BYTE_COUNT}}
 observed_sha256: {{OBSERVED_SHA256}}
 encoding: utf-8
 trailing_newline: {{TRAILING_NEWLINE}}
+report_channel: {{REPORT_CHANNEL}}
 captured_epoch: {{CAPTURED_EPOCH}}
 recorded_epoch: {{RECORDED_EPOCH}}
 recorded_at: {{RECORDED_AT}}
@@ -37,6 +38,12 @@ landed commit or residue it is `REJECTED` with the branch quarantined.
 `artifact_ref` is always `artifacts/tTTTT-aAA/report.md` for THIS attempt. The separate artifact file
 is an opaque byte boundary: report text can contain `---`, front matter, or record framing and none
 of it is ever parsed as control data. `THREAD.md` renders it as quoted content only.
+
+`report_channel` is the channel the bytes actually arrived through, and it must equal the admitted
+one. Be honest about it: no Git record can physically prove which pipe carried a string, so this
+field is the primary's own report. Recording it is what lets a mismatch be a visible defect rather
+than an unbacked claim — and if you find yourself writing a value that is not the admitted one, the
+answer is a new admission, not a different value here.
 
 `trailing_newline` is `present` or `absent` and is part of the manifest because it is a byte-level
 fact that line-oriented handling silently changes. An empty report is `absent`.

@@ -280,6 +280,7 @@ observed_byte_count: $BC
 observed_sha256: $SH
 encoding: utf-8
 trailing_newline: present
+report_channel: human-relay
 captured_epoch: $((e0 + 40))
 recorded_epoch: $((e0 + 40))
 recorded_at: 2026-08-14T10:00:00Z

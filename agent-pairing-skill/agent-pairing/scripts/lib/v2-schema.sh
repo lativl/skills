@@ -767,6 +767,8 @@ v2_schema_result_capture() { # <staged-file> <display-name>
   done
   [ "$(v2_fm_get "$v2_rk_f" encoding)" = utf-8 ] \
     || v2_fail CAPTURE_ENCODING "$v2_rk_n" "encoding must be utf-8"
+  v2_fm_has "$v2_rk_f" report_channel \
+    || v2_fail MISSING_KEY "$v2_rk_n" "missing report_channel"
   case "$(v2_fm_get "$v2_rk_f" trailing_newline)" in
     present|absent) ;;
     *) v2_fail CAPTURE_NEWLINE "$v2_rk_n" "trailing_newline must be present or absent" ;;
@@ -836,10 +838,17 @@ v2_check_captures() { # <topic>
       v2_resolve_attempt_ref "$v2_cp_aref2" ack "$v2_cp_file" "$v2_cp_name" CAPTURE_REF || true
     fi
 
-    # --- capability and the relay patch ------------------------------------------------------------------
+    # --- capability, channel, and the relay patch --------------------------------------------------------
     v2_cp_ap="$(v2_resolve_ref "$(v2_fm_get "$v2_cp_file" assignment_ref)" assignment)" || continue
     v2_cp_adp="$(v2_resolve_ref "$(v2_fm_get "$v2_cp_ap" admission_ref)" admission)" || continue
     v2_cp_cap="$(v2_fm_get "$v2_cp_adp" capability)"
+
+    # The capture records WHICH channel the bytes arrived through, and it must be the admitted one.
+    # This is the primary's own report — nothing in a Git record can physically prove which pipe
+    # carried a string — but recording it makes a mismatch a record-level defect that replay can see,
+    # instead of a claim with no field behind it at all.
+    [ "$(v2_fm_get "$v2_cp_file" report_channel)" = "$(v2_fm_get "$v2_cp_adp" report_channel)" ] \
+      || v2_fail REPORT_CHANNEL "$v2_cp_name" "report_channel '$(v2_fm_get "$v2_cp_file" report_channel)' is not the admitted channel '$(v2_fm_get "$v2_cp_adp" report_channel)'"
 
     # `read-only` is report-only BY CONTRACT. This is a protocol permission rule, not a claim that
     # emitting patch bytes requires filesystem writes: a read-only participant is perfectly capable
@@ -1008,6 +1017,12 @@ v2_check_fences() {
         v2_resolve_attempt_ref "$(v2_fm_get "$v2_fk_file" dispatch_ref)" dispatch \
           "$v2_fk_file" "$v2_fk_name" FENCE_DUE || continue
         v2_fk_dp="$V2_REF_PATH"
+        # A fence must FOLLOW the receipt whose budget it says expired. Resolving the reference and
+        # checking the arithmetic is not enough: a fence committed at a lower record_seq than its own
+        # dispatch fences a delivery the record had not yet made durable — the boundary would
+        # authorize terminating a participant before the receipt it was waiting for existed.
+        [ "$v2_fk_seq" \> "$(v2_fm_get "$v2_fk_dp" record_seq)" ] \
+          || v2_fail FENCE_ORDER "$v2_fk_name" "the fence does not follow the receipt it fences ($(v2_fm_get "$v2_fk_dp" record_seq))"
         [ "$v2_fk_due" = "$(v2_fm_get "$v2_fk_dp" ack_due_epoch)" ] \
           || v2_fail FENCE_DUE "$v2_fk_name" "due_epoch $v2_fk_due is not the receipt's ack_due_epoch $(v2_fm_get "$v2_fk_dp" ack_due_epoch)"
         [ "$(v2_fm_get "$v2_fk_file" job_id)" = "$(v2_fm_get "$v2_fk_dp" job_id)" ] \
@@ -1016,6 +1031,8 @@ v2_check_fences() {
         v2_resolve_attempt_ref "$(v2_fm_get "$v2_fk_file" ack_ref)" ack \
           "$v2_fk_file" "$v2_fk_name" FENCE_ACK_REF || continue
         v2_fk_kp="$V2_REF_PATH"
+        [ "$v2_fk_seq" \> "$(v2_fm_get "$v2_fk_kp" record_seq)" ] \
+          || v2_fail FENCE_ORDER "$v2_fk_name" "the fence does not follow the ACK whose work budget it fences ($(v2_fm_get "$v2_fk_kp" record_seq))"
         [ "$v2_fk_due" = "$(v2_fm_get "$v2_fk_kp" work_due_epoch)" ] \
           || v2_fail FENCE_DUE "$v2_fk_name" "due_epoch $v2_fk_due is not the ACK's work_due_epoch $(v2_fm_get "$v2_fk_kp" work_due_epoch)" ;;
     esac

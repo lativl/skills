@@ -27,6 +27,10 @@ FAIL_AT="${AP_INSTALL_FAIL_AT:-}"   # failure injection, for tests/install-smoke
 # real path is still proven. A release must never set it: skipping the suites is the difference
 # between installing a verified package and installing whatever happens to be on disk.
 SKIP_SUITES="${AP_INSTALL_SKIP_SUITES:-}"
+# ...and it is REFUSED unless both runtime roots are under a temporary directory. "Documented as
+# test-only" is not a control: an environment variable that silently disables every package gate is
+# a production bypass no matter what the comment says, and the release evidence claims those gates
+# protected the release. Enforced below, once the roots are known.
 
 die() { printf 'FATAL: %s\n' "$1" >&2; exit 1; }
 say() { printf '%s\n' "$1"; }
@@ -48,15 +52,18 @@ require_safe_path() { # <label> <path>
   esac
 }
 
+# `shift 2` with only one argument left returns 1 and shifts NOTHING, so without this check the loop
+# re-reads the same option forever. An installer that hangs on a typo is worse than one that refuses.
+need_value() { [ $# -ge 2 ] || die "$1 requires a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --source)              SOURCE="${2-}"; shift 2 ;;
-    --claude-root)         CLAUDE_ROOT="${2-}"; shift 2 ;;
-    --codex-root)          CODEX_ROOT="${2-}"; shift 2 ;;
-    --record-root)         RECORD_ROOTS="$RECORD_ROOTS
-${2-}"; shift 2 ;;
-    --legacy-invalid-ack)  ACK_FILES="$ACK_FILES
-${2-}"; shift 2 ;;
+    --source)              need_value "$@"; SOURCE="$2"; shift 2 ;;
+    --claude-root)         need_value "$@"; CLAUDE_ROOT="$2"; shift 2 ;;
+    --codex-root)          need_value "$@"; CODEX_ROOT="$2"; shift 2 ;;
+    --record-root)         need_value "$@"; RECORD_ROOTS="$RECORD_ROOTS
+$2"; shift 2 ;;
+    --legacy-invalid-ack)  need_value "$@"; ACK_FILES="$ACK_FILES
+$2"; shift 2 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -72,6 +79,15 @@ done
 for r in "$CLAUDE_ROOT" "$CODEX_ROOT"; do
   [ -d "$r" ] || die "runtime root is not a directory: $r"
 done
+
+if [ -n "$SKIP_SUITES" ]; then
+  for r in "$CLAUDE_ROOT" "$CODEX_ROOT"; do
+    case "$(cd "$r" 2>/dev/null && pwd -P)" in
+      /private/tmp/*|/tmp/*|/private/var/folders/*|/var/folders/*) ;;
+      *) die "AP_INSTALL_SKIP_SUITES is refused for '$r': it disables every package gate and is usable only against temporary roots" ;;
+    esac
+  done
+fi
 
 WORK="$(mktemp -d /tmp/agent-pairing-install.XXXXXX)" || die "temp allocation failed"
 [ -n "$WORK" ] && [ -d "$WORK" ] || die "temp allocation produced no directory"
@@ -266,33 +282,56 @@ say "staged and verified both packages"
 # ================================================================================================
 # 3. Save, swap, and roll back on any failure
 # ================================================================================================
-SWAPPED=""      # destinations already renamed, newest first
-CREATED=""      # destinations that had no previous installation
+# Rollback bookkeeping lives in FILES, one record per line, not in space-delimited strings.
+#
+# `for entry in $SWAPPED` splits on whitespace, and an absolute path may legally contain a space —
+# the path guard rejects a whitespace-ONLY path, not a path with a space in it. With a root like
+# `/private/tmp/ap space/claude`, rollback split the entry and ran `rm -rf /private/tmp/ap`: a
+# destructive operation on a path nobody named, while the destination it was supposed to restore was
+# left swapped. The rollback path is exactly where that must not happen.
+SWAP_LOG="$WORK/swapped"    # "destination<TAB>backup", newest first
+CREATED_LOG="$WORK/created" # destinations that had no previous installation
+: >"$SWAP_LOG" || die "cannot create the swap log"
+: >"$CREATED_LOG" || die "cannot create the created log"
 
 rollback() {
   say "ROLLING BACK"
-  for entry in $SWAPPED; do
-    dest="${entry%%|*}"; backup="${entry#*|}"
-    rm -rf "$dest"
-    [ -d "$backup" ] && mv "$backup" "$dest" && say "  restored $dest"
-  done
-  for dest in $CREATED; do
+  # Newest first, so a destination is restored before anything that was swapped before it.
+  if [ -s "$SWAP_LOG" ]; then
+    while IFS="$(printf '\t')" read -r dest backup; do
+      [ -n "$dest" ] || continue
+      rm -rf "$dest"
+      [ -d "$backup" ] && mv "$backup" "$dest" && say "  restored $dest"
+    done <"$WORK/swapped.reversed"
+  fi
+  while IFS= read -r dest; do
+    [ -n "$dest" ] || continue
     rm -rf "$dest" && say "  removed $dest (no previous installation)"
-  done
+  done <"$CREATED_LOG"
 }
 
+# Backup and staging slots are numbered, not derived from the root's BASENAME. Two distinct roots may
+# legitimately share one — `/a/runtime` and `/b/runtime` — and the derived names then collided: the
+# second `mv` nested one destination inside the other's backup, and rollback restored an aggregate
+# directory to one destination while the next step could not find its backup at all. Four
+# destinations, not restored coherently, from two roots that were merely named alike.
+SWAP_N=0
 install_one() { # <runtime-root> <package>
   dest="$1/skills/$2"
   require_safe_path "destination" "$dest"
   mkdir -p "$1/skills" || die "cannot create $1/skills"
-  staged_copy="$WORK/swap.$2.$(basename "$1")"
+  SWAP_N=$((SWAP_N + 1))
+  staged_copy="$WORK/swap.$SWAP_N"
   cp -R "$STAGE/$2" "$staged_copy" || { rollback; die "cannot prepare the swap copy for $dest"; }
   if [ -d "$dest" ]; then
-    backup="$WORK/backup.$2.$(basename "$1")"
+    backup="$WORK/backup.$SWAP_N"
+    [ -e "$backup" ] && { rollback; die "backup slot $backup already exists"; }
     mv "$dest" "$backup" || { rollback; die "cannot save the previous $dest"; }
-    SWAPPED="$dest|$backup $SWAPPED"
+    printf '%s\t%s\n' "$dest" "$backup" >>"$SWAP_LOG"
+    # Newest-first copy, rebuilt after each swap so rollback never has to reverse it under duress.
+    ( cat "$SWAP_LOG" | tail -r 2>/dev/null || tac "$SWAP_LOG" ) >"$WORK/swapped.reversed"
   else
-    CREATED="$dest $CREATED"
+    printf '%s\n' "$dest" >>"$CREATED_LOG"
   fi
   mv "$staged_copy" "$dest" || { rollback; die "cannot install $dest"; }
   say "  installed $dest"
@@ -340,9 +379,9 @@ for pkg in agent-pairing pair-with-primary; do
 done
 
 # Backups go last, and only once every destination has passed.
-for entry in $SWAPPED; do
-  backup="${entry#*|}"
+while IFS="$(printf '\t')" read -r dest backup; do
+  [ -n "$backup" ] || continue
   case "$backup" in "$WORK"/backup.*) rm -rf "$backup" ;; esac
-done
+done <"$SWAP_LOG"
 cleanup
 say "release installed to all four destinations"

@@ -226,6 +226,24 @@ valid topic; only an agent reading the manual and choosing could expose it.
 write or update Git notes; the primary is the record's sole writer." Both v1 defects named and
 refused, unprompted.
 
+## Known limits of what the records can prove
+
+Two acceptance criteria are worth stating precisely, because the honest scope is narrower than a
+casual reading suggests.
+
+**Criterion 12 — "Participant reports use the admitted channel and never Git notes."** The
+*never Git notes* half is genuinely enforced: the participant never updates a ref, and the contract
+suite refuses any Git-note idiom in the manual's code. The *admitted channel* half is **not
+physically verifiable from records** — nothing in a Git repository can prove which pipe carried a
+string. The capture record now carries `report_channel` and the validator binds it to the admission,
+so a mismatch is a visible record-level defect rather than an unbacked claim; but it remains the
+primary's own report. Anyone relying on this should read it as "the record states the channel and
+cannot contradict the admission", not as proof of transport.
+
+**Criterion 15 — review verdict mapping.** Primary-enforced in v2.0 by design. The validator does not
+parse findings prose and makes no claim to. What is testable is that the manual states the mapping
+exactly, which `manual-contract.sh` pins verbatim against the design's own words.
+
 ## Backup
 
 Every live record repository was copied before any disposition, to

@@ -160,6 +160,73 @@ else
 fi
 
 # ============================================================================================
+# Rollback bookkeeping under hostile-but-LEGAL paths. Both of these produced an incoherent restore.
+# ============================================================================================
+
+# A root containing a SPACE. The path guard rejects a whitespace-only path, not a path with a space
+# in it, so this is legal input — and rollback used to split it, running `rm -rf` on the fragment
+# before the space while leaving the real destination swapped.
+c="$(new_env)"
+SPACED="$SMOKE_TMP/with space"
+mkdir -p "$SPACED/claude/skills/agent-pairing" "$SPACED/claude/skills/pair-with-primary" \
+         "$SPACED/codex/skills/agent-pairing" "$SPACED/codex/skills/pair-with-primary" \
+         "$SPACED/claude/agent-pairing" "$SPACED/codex/agent-pairing"
+for d in claude/skills/agent-pairing claude/skills/pair-with-primary \
+         codex/skills/agent-pairing codex/skills/pair-with-primary; do
+  printf 'PREVIOUS RELEASE SENTINEL\n' >"$SPACED/$d/SENTINEL"
+done
+# The sibling that the split path pointed at. It must still be here afterwards.
+mkdir -p "$SMOKE_TMP/with"; printf 'innocent\n' >"$SMOKE_TMP/with/BYSTANDER"
+( cd /private/tmp && AP_INSTALL_SKIP_SUITES=1 AP_INSTALL_FAIL_AT=after-first-swap \
+    /bin/bash "$INSTALL" --source "$SOURCE" --claude-root "$SPACED/claude" --codex-root "$SPACED/codex" ) \
+  >"$SMOKE_TMP/out" 2>&1
+if [ -f "$SMOKE_TMP/with/BYSTANDER" ]; then
+  ok "rollback with a space in the path touches no unnamed sibling"
+else
+  nok "rollback with a space in the path touches no unnamed sibling" "the sibling directory was deleted"
+fi
+if sentinels_intact "$SPACED"; then ok "rollback with a space in the path restores all four"
+else nok "rollback with a space in the path restores all four" "sentinels did not survive"; fi
+
+# Two roots that SHARE a basename. Backup slots derived from the basename collided, so one
+# destination was nested inside the other's backup and rollback could not find it.
+c="$(new_env)"
+SAME="$SMOKE_TMP/same"
+for side in a b; do
+  mkdir -p "$SAME/$side/runtime/skills/agent-pairing" "$SAME/$side/runtime/skills/pair-with-primary" \
+           "$SAME/$side/runtime/agent-pairing"
+  printf 'PREVIOUS RELEASE SENTINEL\n' >"$SAME/$side/runtime/skills/agent-pairing/SENTINEL"
+  printf 'PREVIOUS RELEASE SENTINEL\n' >"$SAME/$side/runtime/skills/pair-with-primary/SENTINEL"
+done
+( cd /private/tmp && AP_INSTALL_SKIP_SUITES=1 AP_INSTALL_FAIL_AT=post-install-validation \
+    /bin/bash "$INSTALL" --source "$SOURCE" --claude-root "$SAME/a/runtime" --codex-root "$SAME/b/runtime" ) \
+  >"$SMOKE_TMP/out" 2>&1
+n=0
+for d in "$SAME/a/runtime/skills/agent-pairing" "$SAME/a/runtime/skills/pair-with-primary" \
+         "$SAME/b/runtime/skills/agent-pairing" "$SAME/b/runtime/skills/pair-with-primary"; do
+  [ -f "$d/SENTINEL" ] && n=$((n + 1))
+done
+if [ "$n" -eq 4 ]; then ok "rollback with two roots sharing a basename restores all four"
+else nok "rollback with two roots sharing a basename restores all four" "only $n/4 restored"; fi
+
+# The suite-skipping knob must be unusable outside a temporary root.
+( cd /private/tmp && AP_INSTALL_SKIP_SUITES=1 /bin/bash "$INSTALL" --source "$SOURCE" \
+    --claude-root "$HOME" --codex-root "$HOME" ) >"$SMOKE_TMP/out" 2>&1
+if [ $? -ne 0 ] && grep -q 'AP_INSTALL_SKIP_SUITES is refused' "$SMOKE_TMP/out"; then
+  ok "the suite-skipping knob is refused against a non-temporary root"
+else
+  nok "the suite-skipping knob is refused against a non-temporary root" "it was accepted"
+fi
+
+# A missing option value must refuse, not loop: `shift 2` with one argument left shifts nothing.
+( cd /private/tmp && /bin/bash "$INSTALL" --source ) >"$SMOKE_TMP/out" 2>&1
+if [ $? -ne 0 ] && grep -q 'requires a value' "$SMOKE_TMP/out"; then
+  ok "a missing option value is refused rather than looping"
+else
+  nok "a missing option value is refused rather than looping" "$(sed -n '1p' "$SMOKE_TMP/out")"
+fi
+
+# ============================================================================================
 # The happy path, and four-way parity.
 # ============================================================================================
 # THE FULL PATH: suites and all. Every other case skips them for speed, so this one is what proves

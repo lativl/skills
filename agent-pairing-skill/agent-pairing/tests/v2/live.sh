@@ -206,6 +206,7 @@ author_sha256: $v2_lc_sh
 observed_byte_count: $v2_lc_bc
 observed_sha256: $v2_lc_sh
 encoding: utf-8
+report_channel: human-relay
 trailing_newline: present
 captured_epoch: $4
 recorded_epoch: $4
@@ -518,6 +519,36 @@ recorded_at: 2026-08-14T12:30:00Z
 Committed after the result that already asserted the timeout.
 FENCE2
       ;;
+    fence-before-dispatch)
+      # A fence committed BEFORE the receipt whose budget it claims expired. Every reference
+      # resolves and the stored arithmetic is consistent, so only an ordering rule catches it -- and
+      # without one, a boundary could authorize terminating a participant before the record had made
+      # the delivery durable at all.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0011-t0002-a01-dispatch.md
+      cat > "$T/turns/0010-t0002-a01-fence-initiated.md" <<FENCE3
+---
+protocol_version: 2
+record_seq: 0010
+kind: fence-initiated
+topic_id: live
+turn_id: 0002
+attempt_id: 01
+turn_kind: NORMAL
+trigger: ack-timeout
+assignment_ref: 0008-t0002-a01-assignment.md
+dispatch_ref: 0011-t0002-a01-dispatch.md
+ack_ref: null
+job_id: job-2
+due_epoch: 1720
+observed_epoch: 1800
+recorded_epoch: 1800
+recorded_at: 2026-08-14T12:00:00Z
+---
+Committed before the receipt it fences.
+FENCE3
+      v2_live_dispatch "$T" live 0011 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      perl -pi -e 's/^recorded_epoch: 1120$/recorded_epoch: 1800/' "$T/turns/0011-t0002-a01-dispatch.md" ;;
     cancel-before-question)
       # A cancel answer ordered BEFORE its own question. Checking only question>close let a forged
       # ordering dissolve a durable close boundary and reopen dispatch.
