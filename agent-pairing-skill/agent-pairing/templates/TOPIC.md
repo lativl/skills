@@ -25,5 +25,24 @@ work_repo_common_dir: {{WORK_REPO_COMMON_DIR}}
 ## Charter
 ## Preconditions
 ## Registry
+## Verification profiles
+
+One block per profile the topic uses. An assignment binds one by `verification_profile_id`, or the
+literal `null` for a turn that verifies nothing. A verification claim is only as good as the
+environment it was made in, so the environment is pinned here rather than assumed.
+
+```yaml
+profile_id: {{PROFILE_ID}}
+lock_identity: {{LOCK_IDENTITY}}
+bootstrap_command: {{BOOTSTRAP_COMMAND}}
+verification_command: {{VERIFICATION_COMMAND}}
+required_tools: {{REQUIRED_TOOLS}}
+required_environment_names: {{REQUIRED_ENVIRONMENT_NAMES}}
+```
+
+`lock_identity` is the lockfile or environment-manifest identity — a digest, not a version range.
+`required_environment_names` lists the NAMES of variables that must be set. **Secret values never
+enter a record.**
+
 ## DECISIONS
 ## Onboarding

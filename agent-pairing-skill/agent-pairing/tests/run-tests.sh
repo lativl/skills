@@ -45,3 +45,4 @@ if [ "$V1_LINE" != "$V1_EXPECTED_PASSES passed, 0 failed" ]; then
 fi
 
 /bin/bash "$HERE/v2/run-tests.sh" || exit $?
+/bin/bash "$HERE/v2/manual-contract.sh" || exit $?

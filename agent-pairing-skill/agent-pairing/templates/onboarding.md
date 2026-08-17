@@ -69,6 +69,20 @@ Agent-Pairing-Turn: <TTTT>
 Agent-Pairing-Attempt: <AA>
 MSG
 ```
+## Verification environment — run it under the assigned profile
+`verification_profile_id: {{VERIFICATION_PROFILE_ID}}`
+
+The profile is defined in `TOPIC.md`. Before claiming anything:
+
+1. Run the profile's exact `bootstrap_command`.
+2. Run the profile's exact `verification_command` — not your own variation of it.
+3. Report the profile ID, the **resolved tool versions**, the exact command, and the **captured
+   output**, including any failing command.
+
+A claim without captured output is a claim, not evidence. If you cannot establish the profile at all,
+say so plainly and stop — do not report a red result from a different environment as though it were a
+finding about this snapshot. An unpinned failure is a fact about the machine you ran on.
+
 ## Verification and VERIFIED result contract
 ## RELAY-THIS fallback
 ## DON'T list

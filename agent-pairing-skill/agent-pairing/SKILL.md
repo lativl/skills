@@ -353,6 +353,44 @@ patch is admissible only under `capability: writes-repo-only`.
 11. **Decide the next move**: another assignment · a remediation turn · an owner question · close.
     Append each settled decision to `TOPIC.md`'s DECISIONS as one line.
 
+### Verification and review policy
+
+**Verification is bound to a declared environment.** Each verification-capable assignment carries
+`verification_profile_id`, and `TOPIC.md` defines every profile the topic uses: lockfile identity,
+exact bootstrap command, exact verification command, required runtime and tool versions, and the
+NAMES of required environment variables. Secret values never enter a record. The participant reports
+the profile ID, the resolved tool versions, the exact command it ran, and the captured output.
+
+When a check goes red under an environment that is not the assigned profile:
+**unpinned red is a fact about the executor environment, not the snapshot.**
+It cannot directly produce `REJECTED`. Re-run
+the check under the assignment's profile. If the profile cannot be established at all, record a
+`GATE` with a durable owner and tracker reference and obtain the owner's disposition — do not convert
+an environment you could not reproduce into a correctness claim about someone else's code.
+
+**Review findings use exactly three severities:**
+
+| Severity | Meaning |
+| --- | --- |
+| `BLOCKING` | a correctness, safety, scope, or acceptance failure |
+| `GATE` | must have an owner and a durable tracker reference before its named lifecycle gate |
+| `NONBLOCKING` | an improvement that does not affect acceptance |
+
+**The verdict stays binary:**
+
+```text
+PASS = no BLOCKING findings and every GATE has tracker_ref plus owner
+FAIL = any BLOCKING finding or any unmaterialized GATE
+```
+
+`PASS` maps to a VERIFIED review result; `FAIL` maps to `REJECTED`. `NONBLOCKING` findings never
+change the verdict. Three severities exist so that "this must be fixed now" and "this must be owned
+before release" stop competing for one word — not so that a third outcome can appear between pass and
+fail.
+
+In v2.0 this is **primary-enforced review policy**: the validator does not parse findings prose and
+makes no claim to enforce a findings ledger. A durable findings ledger is deferred to v2.1.
+
 ### The verification matrix
 
 | Context | What runs | Gates or observations? |

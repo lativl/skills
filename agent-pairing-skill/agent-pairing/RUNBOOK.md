@@ -487,3 +487,42 @@ What still works, and what to do:
   never be recorded as evidence about the topic.
 - If the *primary itself* is sandboxed this way, it cannot gate turns. Say so to the owner and stop:
   a classification you could not run is not a classification.
+
+---
+
+## Environment parity
+
+A verification claim is only as good as the environment it was made in. `TOPIC.md` pins every
+profile the topic uses; each verification-capable assignment binds one by `verification_profile_id`.
+
+```yaml
+profile_id: python-pinned
+lock_identity: sha256:<digest of the lockfile or environment manifest>
+bootstrap_command: uv sync --frozen
+verification_command: uv run pytest -q
+required_tools: python 3.12.4, uv 0.4.20
+required_environment_names: TEST_APP_DATABASE_URL_PG TEST_SYSTEM_DATABASE_URL_PG
+```
+
+`lock_identity` is a digest, not a version range — "compatible" is not an identity. `required_tools`
+records the versions actually resolved, so a later reader can tell whether a rerun is comparable.
+`required_environment_names` lists **names only**; a secret value in a record is a leak that
+append-only history makes permanent.
+
+### Rerunning a red check
+
+The rule that makes this worth the trouble: **an unpinned failure is a fact about the executor's
+machine, not about the assigned snapshot.** So a red check that was not run under the assignment's
+profile cannot produce `REJECTED`.
+
+```text
+1. Re-run under the profile's exact bootstrap_command and verification_command.
+2. Red again, under the profile → a real finding; classify it by severity.
+3. Cannot establish the profile at all → record a GATE with a durable owner and tracker
+   reference, and get the owner's disposition. Never convert an environment you could not
+   reproduce into a correctness claim about someone else's code.
+```
+
+This is where a pairing session most often produces a false rejection: the reviewer's toolchain
+drifts, a lockfile is not honored, and a perfectly good snapshot is rejected for the reviewer's own
+missing dependency. The profile is what makes that distinguishable from a genuine failure.

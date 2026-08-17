@@ -1800,6 +1800,12 @@ d="$TMPROOT/templated"; mkdir -p "$d/turns"
 sed -e 's/{{TOPIC_ID}}/templated/' \
     -e 's/{{PARTICIPANT_START_MODE}}/owner-manual/' \
     -e 's/{{PARTICIPANT_SELECTION_SOURCE}}/initial-prompt/' \
+    -e 's/{{PROFILE_ID}}/python-pinned/' \
+    -e 's/{{LOCK_IDENTITY}}/sha256:deadbeef/' \
+    -e 's/{{BOOTSTRAP_COMMAND}}/uv sync --frozen/' \
+    -e 's/{{VERIFICATION_COMMAND}}/uv run pytest -q/' \
+    -e 's/{{REQUIRED_TOOLS}}/python 3.12.4/' \
+    -e 's/{{REQUIRED_ENVIRONMENT_NAMES}}/TEST_APP_DATABASE_URL_PG/' \
     -e 's/{{BASE_SHA}}/1111111111111111111111111111111111111111/' \
     -e 's|{{BASE_REF}}|origin/dev|' \
     -e 's|{{SESSION_BRANCH}}|pair/templated|' -e 's|{{SESSION_WORKTREE}}|/tmp/wt/templated|' \

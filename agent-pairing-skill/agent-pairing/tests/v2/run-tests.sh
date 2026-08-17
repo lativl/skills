@@ -567,6 +567,11 @@ if v2_group templates; then
           -e 's|{{SESSION_WORKTREE}}|/private/tmp/wt/templated|' \
           -e 's|{{WORK_REPO_COMMON_DIR}}|/private/tmp/repo/.git|' \
           -e 's|{{SCOPE}}|src/ docs/|' \
+          -e 's/{{PROFILE_ID}}/python-pinned/' -e 's/{{LOCK_IDENTITY}}/sha256:deadbeef/' \
+          -e 's/{{BOOTSTRAP_COMMAND}}/uv sync --frozen/' \
+          -e 's/{{VERIFICATION_COMMAND}}/uv run pytest -q/' \
+          -e 's/{{REQUIRED_TOOLS}}/python 3.12.4/' \
+          -e 's/{{REQUIRED_ENVIRONMENT_NAMES}}/TEST_APP_DATABASE_URL_PG/' \
           -e 's/{{TURN_KIND}}/NORMAL/' -e 's/{{TURN_ID}}/0001/' -e 's/{{ATTEMPT_ID}}/01/' \
           -e 's/{{AGENT_ID}}/agent-a/' \
           -e 's/{{RECORDED_AT}}/2026-08-14T10:00:00Z/' \
