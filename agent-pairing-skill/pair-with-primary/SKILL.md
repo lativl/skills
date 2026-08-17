@@ -41,7 +41,7 @@ To LIST the committed records — the newest assignment, the intent — enumerat
 directory:
 
 ```bash
-git -C "$TOPIC" ls-tree --name-only HEAD turns
+git -C "$TOPIC" ls-tree -r --name-only HEAD turns
 ```
 
 That is the positive form of the rule above. Forbidding the working tree without saying what to do
@@ -73,13 +73,53 @@ instead, and that is a different capability with different rules.
 
 Repeat until the primary or the user tells you to stop.
 
-### 2a. Wait for the COMMITTED receipt, bounded
+### 2a. Wait for the next dispatch — two waits, both bounded
 
 Never start from an assignment alone. The primary commits the assignment, then the intent, then the
 receipt. Only the committed receipt means "go", and waiting for it is what keeps "no intent proves
 never dispatched" true.
 
-Read `expected_dispatch_ref` and `receipt_commit_by_epoch` from the committed intent, then:
+There are **two** waits here and they are not the same thing. Collapsing them is a real trap: on your
+second time round this loop the previous turn's `EXPECTED_DISPATCH_REF` still names a receipt that
+*is* committed, so a single wait finds it instantly and you re-acknowledge and re-work the dispatch
+you just finished — taking a second turn on one dispatch, which this manual forbids.
+
+Track what you have already handled, once, at the top of the session:
+
+```bash
+HANDLED=""            # attempts you have acknowledged, as "tTTTT-aAA tTTTT-aAA ..."
+IDLE_BUDGET_SECONDS=1800   # how long you stay available between turns; operator-set
+```
+
+**Wait one — for a NEW intent.** Between turns you are idle, and the primary may take any amount of
+time to open the next one. That wait is bounded too, by a budget you own rather than by anything in
+the record: an unbounded waiter cannot be observed or fenced.
+
+```bash
+IDLE_UNTIL=$(( $(date +%s) + IDLE_BUDGET_SECONDS ))
+INTENT=""
+while [ "$(date +%s)" -le "$IDLE_UNTIL" ]; do
+  HEAD_SHA="$(git -C "$TOPIC" rev-parse HEAD)" || exit 1
+  # Newest intent first; take the first one whose attempt you have not already handled.
+  for f in $(git -C "$TOPIC" ls-tree -r --name-only "$HEAD_SHA" turns \
+             | grep -- '-intent\.md$' | LC_ALL=C sort -r); do
+    ATT="$(printf '%s\n' "$f" | sed -E 's|^turns/[0-9]{4}-(t[0-9]{4}-a[0-9]{2})-intent\.md$|\1|')"
+    case " $HANDLED " in *" $ATT "*) continue ;; esac
+    INTENT="$f"; break
+  done
+  [ -n "$INTENT" ] && break
+  sleep 5
+done
+[ -n "$INTENT" ] || {
+  printf 'idle_wait: expired; worktree_writes: 0\n'
+  exit 0
+}
+git -C "$TOPIC" show "$HEAD_SHA:$INTENT"
+```
+
+Read `expected_dispatch_ref` and `receipt_commit_by_epoch` from **that** intent.
+
+**Wait two — for THAT intent's receipt**, bounded by the intent's own `receipt_commit_by_epoch`:
 
 ```bash
 FOUND_RECEIPT=no
@@ -98,11 +138,12 @@ done
 }
 ```
 
-**The wait is bounded and in the foreground.** If the bound passes with no committed receipt, write
-**nothing** to the worktree, report the zero-write expiry, and return control. Replay then sees a
-committed intent with no receipt and classifies `DISPATCH_UNKNOWN`, which is the truthful state.
+**Both waits are bounded and in the foreground.** If the receipt bound passes with no committed
+receipt, write **nothing** to the worktree, report the zero-write expiry, and return control. Replay
+then sees a committed intent with no receipt and classifies `DISPATCH_UNKNOWN`, which is the truthful
+state.
 
-Do not leave a background monitor. Do not silently repeat the wait forever: an unbounded waiter
+Do not leave a background monitor. Do not silently repeat either wait forever: an unbounded waiter
 cannot be observed or fenced, and a poll whose result nobody reads is not a poll.
 
 You may receive a transport prompt *before* the receipt is committed — some transports reveal the
@@ -210,9 +251,14 @@ For a relay patch (invisible worktree, `writes-repo-only`), send
 `git diff --binary --full-index` output with its own base SHA, byte count and SHA-256, measured the
 same way.
 
-### 2f. Go straight back to 2a
+### 2f. Record the attempt as handled, then go straight back to 2a
 
-In the same turn, without producing a final message. One turn per dispatch, waiting in between.
+```bash
+HANDLED="$HANDLED t<turn_id>-a<attempt_id>"
+```
+
+That one line is what stops the loop re-finding the intent you just finished. Then go back to 2a, in
+the same turn, without producing a final message. One turn per dispatch, waiting in between.
 
 **DO NOT END YOUR TURN WHILE PAIRED.** Your runtime returns control to the human the moment you
 produce a final message, and a loop that has yielded is a loop that is gone — the primary then

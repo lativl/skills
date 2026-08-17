@@ -96,6 +96,15 @@ require_code "the receipt existence check is a committed-object probe" 'cat-file
   "the manual must probe for the receipt object rather than for a file on disk"
 require_code "the wait is bounded by the intent's receipt bound" 'RECEIPT_COMMIT_BY_EPOCH' \
   "the wait must terminate at receipt_commit_by_epoch"
+# The between-turns wait is a DIFFERENT wait from the receipt wait, and it needs its own bound.
+require_code "the idle wait between turns is bounded too" 'IDLE_BUDGET_SECONDS|IDLE_UNTIL' \
+  "an unbounded between-turns waiter cannot be observed or fenced"
+# ...and the loop must not re-find the dispatch it just finished. On the second pass the previous
+# EXPECTED_DISPATCH_REF still names a committed receipt, so without this the participant
+# re-acknowledges and re-works one dispatch -- taking a second turn on it, which the manual forbids.
+require_code "handled attempts are tracked across the loop" 'HANDLED' \
+  "the loop must skip attempts it has already acknowledged"
+require "the loop waits for a NEW intent, not the old receipt" "Wait one — for a NEW intent"
 
 require "the expiry writes nothing to the worktree" "worktree_writes: 0"
 require "the ACK is the first response" "ACK FIRST"
