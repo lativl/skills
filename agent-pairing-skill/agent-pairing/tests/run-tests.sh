@@ -48,3 +48,17 @@ fi
 /bin/bash "$HERE/v2/manual-contract.sh" || exit $?
 /bin/bash "$HERE/behavior/run-tests.sh" || exit $?
 /bin/bash "$HERE/../../pair-with-primary/tests/run-tests.sh" || exit $?
+
+# --- the shipped example, replayed end to end ----------------------------------------------------------
+# The example is the only artifact that exercises the whole protocol at once, so the gate rehydrates
+# it from its bundles and requires exact CLOSED. Rehydrating rather than reading a checked-in
+# directory is what makes it a real replay: the bundles are the shipped artifact, and a bundle that
+# no longer restores is a broken release even if a stale directory beside it still validates.
+EXAMPLE="$HERE/../example"
+EXAMPLE_TOPIC="$(/bin/bash "$EXAMPLE/rehydrate.sh" --print-topic)" || exit $?
+[ -n "$EXAMPLE_TOPIC" ] || { echo "FATAL: rehydrate.sh printed no topic path" >&2; exit 3; }
+/bin/bash "$HERE/../scripts/validate.sh" --check "$EXAMPLE_TOPIC" \
+  | grep -Fx 'classification: CLOSED' >/dev/null \
+  || { echo "FATAL: the shipped example does not replay to CLOSED" >&2; exit 1; }
+/bin/bash "$EXAMPLE/rehydrate.sh" --clean || exit $?
+printf 'example: replayed to CLOSED\n'
