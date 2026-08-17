@@ -26,7 +26,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version"
+V2_GROUPS="version common"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -83,6 +83,50 @@ if v2_group version; then
     v2_nok "a missing fixture leaves no stale evidence behind" "\$V2_OUT retained previous output"
   else
     v2_ok "a missing fixture leaves no stale evidence behind"
+  fi
+fi
+
+# --- common: committed-only reads and the fields every v2 record carries -----------------------------
+if v2_group common; then
+  v2_expect_ok "the canonical valid attempt passes the common grammar" common-valid
+
+  v2_expect_only_violation "record version is required" \
+    common-defects/missing-record-version RECORD_PROTOCOL_VERSION
+  v2_expect_only_violation "record sequence is decimal" \
+    common-defects/bad-record-seq RECORD_SEQ
+  v2_expect_only_violation "epoch is nonnegative" \
+    common-defects/negative-epoch RECORDED_EPOCH
+  v2_expect_only_violation "epochs do not decrease" \
+    common-defects/decreasing-epoch EPOCH_ORDER
+  v2_expect_only_violation "unknown kind is rejected" \
+    common-defects/unknown-kind UNKNOWN_KIND
+  v2_expect_only_violation "working-tree-only record is ignored then reported as residue" \
+    common-defects/uncommitted-record UNCOMMITTED_RESIDUE
+
+  # Regression: each record must be staged to its OWN file. `v2_stage_committed` runs inside `$( )`,
+  # so a counter-derived slot name never increments in the parent — every record staged over the
+  # same path and every cross-record read returned the LAST record's bytes, which is a comparison of
+  # a record with itself reporting agreement. Asserting the violation's SUBJECT (not just its code)
+  # is what pins per-record identity: under the collision the epoch defect was invisible entirely.
+  v2_run "$V2_FIXTURES/common-defects/decreasing-epoch" || true
+  if grep -F 'VIOLATION EPOCH_ORDER 0004-t0001-a01-dispatch.md' "$V2_OUT" >/dev/null; then
+    v2_ok "a violation names the record that carries the defect"
+  else
+    v2_nok "a violation names the record that carries the defect" \
+      "expected EPOCH_ORDER against 0004-t0001-a01-dispatch.md; got: $(grep -m1 VIOLATION "$V2_OUT")"
+  fi
+
+  # The residue case must ALSO prove the working-tree bytes were never treated as records: had the
+  # validator read `turns/` from disk, it would have found five well-formed records and could have
+  # classified the topic instead of reporting residue. The fixture is re-run rather than read from
+  # whatever happens to be in $V2_OUT, so reordering the cases above cannot silently retarget it.
+  v2_run "$V2_FIXTURES/common-defects/uncommitted-record" || true
+  if grep -F 'VIOLATION UNCOMMITTED_RESIDUE' "$V2_OUT" >/dev/null \
+     && ! grep -F 'classification:' "$V2_OUT" >/dev/null; then
+    v2_ok "an uncommitted record set yields no classification"
+  else
+    v2_nok "an uncommitted record set yields no classification" \
+      "the validator produced a classification from working-tree bytes"
   fi
 fi
 

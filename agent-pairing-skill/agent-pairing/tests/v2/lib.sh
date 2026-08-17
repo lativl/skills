@@ -87,6 +87,41 @@ v2_expect_violation() { # <name> <fixture> <code>
   fi
 }
 
+# Assert the validator refuses a fixture with EXACTLY ONE violation code — the expected one.
+#
+# One-defect fixtures are only evidence if one defect produces one code. A case that passes because
+# the mutation happened to trip three unrelated rules proves nothing about the rule it names, and it
+# keeps passing after the rule it names is deleted.
+v2_expect_only_violation() { # <name> <fixture> <code>
+  v2_name="$1" v2_fixture="$2" v2_code="$3"
+  if v2_run "$V2_FIXTURES/$v2_fixture"; then
+    v2_nok "$v2_name" "validator unexpectedly returned zero"
+    return
+  fi
+  if [ "$V2_RC" -ne 2 ]; then
+    v2_nok "$v2_name" "expected exit 2 (protocol violation); got $V2_RC: $(sed -n '1p' "$V2_OUT")"
+    return
+  fi
+  v2_codes="$(awk '$1 == "VIOLATION" { print $2 }' "$V2_OUT" | LC_ALL=C sort -u | tr '\n' ' ')"
+  v2_codes="${v2_codes% }"
+  if [ "$v2_codes" = "$v2_code" ]; then
+    v2_ok "$v2_name"
+  else
+    v2_nok "$v2_name" "expected exactly [$v2_code]; got [$v2_codes]"
+  fi
+}
+
+# Assert the validator accepts a fixture. Used where a task has established a fixture's validity but
+# a later task still owns the classification it should produce.
+v2_expect_ok() { # <name> <fixture>
+  v2_name="$1" v2_fixture="$2"
+  if v2_run "$V2_FIXTURES/$v2_fixture"; then
+    v2_ok "$v2_name"
+  else
+    v2_nok "$v2_name" "validator refused a valid fixture (rc $V2_RC): $(sed -n '1p' "$V2_OUT")"
+  fi
+}
+
 # Assert the validator accepts a fixture and prints one exact classification line.
 v2_expect_classification() { # <name> <fixture> <classification>
   v2_name="$1" v2_fixture="$2" v2_class="$3"
