@@ -83,18 +83,23 @@ the read, then classify again; never act on a classification carrying `unverifie
 `--render` never publishes a partial `THREAD.md`: on failure it exits 2 and leaves the previous
 file intact.
 
-**The validator reads `turns/` from the working tree, but `THREAD.md` from `HEAD`.** So an
-assignment that was written but never committed classifies exactly as if it had been committed —
-`OPEN (never-dispatched)` — and the fail-closed rule "if the commit fails, there is no dispatch"
-would rest on you noticing the failed commit. It does not: **every gate that precedes a dispatch
-first requires the record repo to be clean.**
+**The validator reads every record from committed Git objects — never from the working tree.** This
+is the v2 inversion of a v1 defect: v1 read `turns/` from disk, so an assignment written but never
+committed classified exactly as if it had been committed, and the fail-closed rule "if the commit
+fails, there is no dispatch" rested on you noticing the failed commit.
+
+Now a record that is not committed does not exist. Uncommitted bytes under `turns/` are not read as
+records at all; they are reported as `UNCOMMITTED_RESIDUE`, which is a violation, because a
+half-written record is evidence of an interrupted write and a topic carrying one has no trustworthy
+state to report.
 
 ```bash
-git -C <topic-dir> status --porcelain      # must be empty before you trust a classification
+git -C <topic-dir> status --porcelain -- turns TOPIC.md   # must be empty before you trust a classification
 ```
 
-A non-empty result means the classification describes a record that does not durably exist. Commit
-it (or resolve it by kind — **RESUME** step 0) before acting.
+The pathspec is the record tree. `artifacts/` is excluded on purpose: an artifact's integrity is
+pinned by its capture record's byte count and SHA-256, which is stronger evidence than a status
+line, and including it would make an ignored `.DS_Store` read as protocol residue.
 
 ---
 
@@ -110,6 +115,13 @@ If the initial request unambiguously says to spawn, select primary-spawn and do 
 If it unambiguously says the owner will pair by topic ID, select owner-manual and do not ask.
 Otherwise ask exactly once: "How should the secondary agent join this topic: should I spawn it, or will you pair it manually using the topic ID?"
 ```
+
+**A request that contradicts itself is not unambiguous — including one that corrects itself.** "Spawn
+the agent — actually, I'll pair it myself" reads to a person as a retraction, but you are not being
+asked to be a good reader here; you are being asked not to guess. Take the ask-once branch. The cost
+is one question with a bounded answer, and the cost of guessing wrong is an admission record
+describing a pairing that did not happen — which then has to be superseded by a new admission,
+because admissions are append-only.
 
 `participant_selection_source` is `initial-prompt` when the request settled it and `owner-answer`
 when you had to ask. Ask **once**: a second question about the same choice is a stall, and a
@@ -724,8 +736,12 @@ dangling link, an unauthorized owner action. A gap can only mean deletion or tam
 something to write past. Ask the owner.
 
 The validator replays the record in `record_seq` order, checks every linkage, derives the accepted
-SHA, and prints a header (`accepted_sha`, `open_attempt`, `dispatched_at`) followed by one
-`classification:` line.
+SHA, and prints `accepted_sha`, then the STORED due epochs it found — `receipt_commit_by_epoch`,
+`ack_due_epoch`, `work_due_epoch` — followed by one `classification:` line.
+
+**Those epochs are printed, not evaluated.** The validator has no clock. Compare them against your
+own, and if one has passed, that is an observation: nothing changes until you commit a
+`fence-initiated` record (**FENCE**).
 
 ### Step 2 — confirm the worktree is registered
 
@@ -746,7 +762,11 @@ half is yours. First match wins, and the validator already applied that preceden
 |---|---|---|
 | `IDLE` | Tip = HEAD = accepted SHA, clean, nothing open | Start the next turn (**CYCLE**) or close (**CLOSE**) |
 | `OPEN (never-dispatched)` | An unmatched assignment with no intent — provably never dispatched | Write a mechanical `ABORTED: never-dispatched` result, then a new assignment with a bumped attempt, and re-dispatch. No human needed |
-| `OPEN (dispatched)` | A receipt exists | Fence it (**FENCE**) by its `job_id` |
+| `AWAITING_PARTICIPANT` | The topic is open and no admission exists | Spawn, or wait for the owner to confirm the participant joined, then commit the admission (**OPEN** step 11) |
+| `AWAITING_ACK` | A committed receipt with no ACK and no capture | Wait, or fence at `ack_due_epoch` (**FENCE**) |
+| `RESULT_BUFFERED` | A capture with no ACK | Wait for the ACK, or fence at `ack_due_epoch`. **Never** treat the capture as an implied ACK |
+| `WORKING` | A valid ACK with no terminal result | Observe progress, or fence at `work_due_epoch`. A capture may also be present — that changes your next action, not the state |
+| `FENCING` | A committed `fence-initiated` with no terminal result | Confirm termination, or ask the owner. No late event reopens the attempt |
 | `DISPATCH_UNKNOWN` | An intent with no receipt | First run the transport's token search for the idempotency token (`RUNBOOK.md`). Found → write the receipt with `receipt_source: token-search`. Not found → write **exactly one** owner question with `blocks` naming this attempt. If the latest answer was `dispatch-unresolved`, stay here and wait for new evidence — do **not** write another automatic question |
 | `AWAITING_OWNER` | An unanswered owner question | **Stop.** Nothing else may be written until the answer is recorded |
 | `OWNER_ACTION_PENDING` | An actionable dispatch authorization that has not materialized | Execute the authorized materialization idempotently (below). An answer alone never closes an assignment; never blind-retry |

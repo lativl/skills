@@ -441,6 +441,83 @@ job_id: job-recovered" ;;
       v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
       v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
       v2_live_result "$T" live 0011 1130 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md null null ABORTED ack-timeout null ;;
+    ack-timeout-terminal)
+      # The design's OWN authorized lifecycle: a clean stationary fenced ack-timeout attempt
+      # terminates ABORTED: ack-timeout with ack_ref: null, because an ack-timeout attempt has no ACK
+      # by definition. This is a VALID topic; it existed only as an unrecordable one.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      cat > "$T/turns/0011-t0002-a01-fence-initiated.md" <<FENCE
+---
+protocol_version: 2
+record_seq: 0011
+kind: fence-initiated
+topic_id: live
+turn_id: 0002
+attempt_id: 01
+turn_kind: NORMAL
+trigger: ack-timeout
+assignment_ref: 0008-t0002-a01-assignment.md
+dispatch_ref: 0010-t0002-a01-dispatch.md
+ack_ref: null
+job_id: job-2
+due_epoch: $(( 1120 + 600 ))
+observed_epoch: $(( 1120 + 700 ))
+recorded_epoch: $(( 1120 + 700 ))
+recorded_at: 2026-08-14T12:00:00Z
+---
+The ACK budget expired with no acknowledgement.
+FENCE
+      v2_live_result "$T" live 0012 1900 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md null null ABORTED ack-timeout null ;;
+    result-cites-wrong-answer)
+      # A result claiming the owner confirmed termination, citing an answer that authorized nothing
+      # of the sort. This closed a possibly-live attempt with nobody having confirmed it.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_question "$T" live 0010 1120 q-1 general
+      v2_live_answer "$T" live 0011 1130 q-1 record-decision
+      v2_live_result "$T" live 0012 1140 0002 01 NORMAL 0008-t0002-a01-assignment.md null null null ABORTED terminated-before-result null
+      perl -pi -e 's/^observed_at: /owner_answer_ref: 0011-owner-answer.md\nobserved_at: /' \
+        "$T/turns/0012-t0002-a01-result.md" ;;
+    receipt-claims-owner-answer)
+      # A receipt asserting owner-answer provenance while naming nobody -- which also slipped past
+      # the entire owner-answer binding stage, since that stage only inspects records carrying the ref.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      perl -pi -e 's/^receipt_source: direct$/receipt_source: owner-answer/' \
+        "$T/turns/0010-t0002-a01-dispatch.md" ;;
+    fence-after-timeout-result)
+      # The fence committed AFTER the result that asserts the timeout: counting a fence is not
+      # ordering one, and a timeout asserted before its boundary existed is the state change the
+      # boundary exists to make durable, happening without it.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      v2_live_result "$T" live 0011 1900 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md null null ABORTED ack-timeout null
+      cat > "$T/turns/0012-t0002-a01-fence-initiated.md" <<FENCE2
+---
+protocol_version: 2
+record_seq: 0012
+kind: fence-initiated
+topic_id: live
+turn_id: 0002
+attempt_id: 01
+turn_kind: NORMAL
+trigger: ack-timeout
+assignment_ref: 0008-t0002-a01-assignment.md
+dispatch_ref: 0010-t0002-a01-dispatch.md
+ack_ref: null
+job_id: job-2
+due_epoch: $(( 1120 + 600 ))
+observed_epoch: $(( 1120 + 800 ))
+recorded_epoch: 1950
+recorded_at: 2026-08-14T12:30:00Z
+---
+Committed after the result that already asserted the timeout.
+FENCE2
+      ;;
     cancel-before-question)
       # A cancel answer ordered BEFORE its own question. Checking only question>close let a forged
       # ordering dissolve a durable close boundary and reopen dispatch.
@@ -494,9 +571,17 @@ v2_expect_live_violation() { # <name> <mode> <code>
   v2_lv_rc=$?
   if [ "$v2_lv_rc" -ne 2 ]; then
     v2_nok "$v2_lv_n" "expected exit 2; got $v2_lv_rc: $(grep -m1 -E '^(classification|VIOLATION|FATAL)' "$V2_OUT")"
-  elif grep -F "VIOLATION $v2_lv_c" "$V2_OUT" >/dev/null; then
+    return
+  fi
+  # EXACTLY one code, not merely "the expected code appears". Greping for the expected code alone
+  # let a fixture trip two violations and still pass -- which is precisely how a real defect hid
+  # here: the `timeout-without-fence` case was also tripping RESULT_ACK_REF, because the design's own
+  # ABORTED: ack-timeout lifecycle had been made unrecordable, and the suite never said so.
+  v2_lv_codes="$(awk '$1 == "VIOLATION" { print $2 }' "$V2_OUT" | LC_ALL=C sort -u | tr '\n' ' ')"
+  v2_lv_codes="${v2_lv_codes% }"
+  if [ "$v2_lv_codes" = "$v2_lv_c" ]; then
     v2_ok "$v2_lv_n"
   else
-    v2_nok "$v2_lv_n" "expected VIOLATION $v2_lv_c; got: $(grep -m1 VIOLATION "$V2_OUT")"
+    v2_nok "$v2_lv_n" "expected exactly [$v2_lv_c]; got [$v2_lv_codes]"
   fi
 }

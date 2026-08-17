@@ -37,6 +37,17 @@ git -C "$TOPIC" cat-file -e HEAD:TOPIC.md 2>/dev/null || { echo "no committed to
 git -C "$TOPIC" show HEAD:TOPIC.md
 ```
 
+To LIST the committed records — the newest assignment, the intent — enumerate the tree, never the
+directory:
+
+```bash
+git -C "$TOPIC" ls-tree --name-only HEAD turns
+```
+
+That is the positive form of the rule above. Forbidding the working tree without saying what to do
+instead leaves listing the directory as the path of least resistance, which is exactly the habit this
+manual exists to break.
+
 For a **slug**, check both runtime record roots. Stop on zero matches and stop on more than one — two
 topics with the same slug in different roots is an ambiguity you must not resolve by guessing.
 
@@ -108,7 +119,7 @@ topic: <topic_id>   turn: <turn_id>   attempt: <attempt_id>
 idempotency_token: <exact value from the committed intent>
 admission_ref: <exact value from the assignment>
 dispatch_ref: <the receipt you just read>
-job_id: <exact value from the receipt, when your transport lets you see it>
+job_id: <exact value from the receipt you just read>
 ack_evidence_class: <transport-attested | human-relayed, as admitted>
 observed_head: <see the table>
 preflight_clean: <see the table>

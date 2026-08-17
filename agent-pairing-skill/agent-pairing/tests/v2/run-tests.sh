@@ -507,6 +507,21 @@ if v2_group classification; then
   # A timeout is terminal only after its boundary is committed, or the durable fence is optional.
   v2_expect_live_violation "a timeout result requires its committed fence" \
     timeout-without-fence REASON_CONTRADICTED
+  # Counting a fence is not ordering one.
+  v2_expect_live_violation "a timeout result cannot precede its own fence" \
+    fence-after-timeout-result REASON_CONTRADICTED
+  # A result claiming the owner confirmed termination must cite an answer that authorized THAT.
+  v2_expect_live_violation "a result must cite an answer that authorized its own reason" \
+    result-cites-wrong-answer OWNER_ANSWER_MISMATCH
+  # A receipt asserting owner-answer provenance must name the answer, or it slips past the binding
+  # stage entirely while claiming the owner materialized it.
+  v2_expect_live_violation "a receipt claiming owner-answer provenance must cite it" \
+    receipt-claims-owner-answer MISSING_KEY
+
+  # The design's OWN authorized lifecycle, which was unrecordable: a clean stationary fenced
+  # ack-timeout attempt terminates ABORTED: ack-timeout with ack_ref: null, because such an attempt
+  # has no ACK by definition. Fail-closed is still wrong when it forbids the documented path.
+  v2_expect_live "a fenced ack-timeout attempt can terminate" ack-timeout-terminal IDLE
 fi
 
 # --- render: deterministic, committed-only, and never destructive -------------------------------------

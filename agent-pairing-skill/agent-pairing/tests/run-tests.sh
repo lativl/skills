@@ -46,4 +46,5 @@ fi
 
 /bin/bash "$HERE/v2/run-tests.sh" || exit $?
 /bin/bash "$HERE/v2/manual-contract.sh" || exit $?
+/bin/bash "$HERE/behavior/run-tests.sh" || exit $?
 /bin/bash "$HERE/../../pair-with-primary/tests/run-tests.sh" || exit $?

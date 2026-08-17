@@ -46,14 +46,48 @@ refuse "no Git notes" 'git .*notes' \
 
 # v1 listed turns/ from the WORKING TREE, so an uncommitted receipt authorized work. That is the
 # defect this whole protocol exists to remove.
-refuse "the record working tree is never listed" '(^|[^-])ls .*\$?\{?TOPIC\}?.*turns' \
-  "listing turns/ reads the working tree; an uncommitted receipt would authorize work"
-refuse "no working-tree glob over records" '\$\{?TOPIC\}?/turns/\*' \
-  "a glob over turns/ reads the working tree rather than committed objects"
+#
+# The patterns below are deliberately IDIOM-BLIND rather than command-specific. An earlier version
+# named `ls` and a `$TOPIC/turns/*` glob, and every one of these slipped past it: a quoted
+# `"$TOPIC"/turns/*` (the quote breaks a `$TOPIC/turns` pattern), a `find "$TOPIC/turns"`, and a
+# `for f in .../turns/*.md`. What they share is not a command name — it is touching `turns` as a
+# FILESYSTEM PATH. That is what gets refused.
+# OBJECT reads are the whole point, so they are excluded first, by the marks that identify them:
+# a `HEAD:`-prefixed path, `ls-tree`, or `cat-file`. `cat-file` in particular contains the substring
+# `cat`, so a naive command-name pattern flags the correct idiom as the forbidden one. What remains
+# after that exclusion is a command touching `turns` as a filesystem path, whatever it is called.
+CODE_FS="$(printf '%s\n' "$CODE" | grep -v -E 'HEAD:|ls-tree|cat-file')"
+if printf '%s\n' "$CODE_FS" | grep -Eq '(^|[^-[:alnum:]])(ls|find|cat|head|tail|for [A-Za-z_]+ in)[^|]*turns'; then
+  nok "no filesystem read of the record tree" \
+    "reading turns/ as a filesystem path reads the working tree; an uncommitted receipt would authorize work: $(printf '%s\n' "$CODE_FS" | grep -E '(^|[^-[:alnum:]])(ls|find|cat|head|tail|for [A-Za-z_]+ in)[^|]*turns' | head -1)"
+else
+  ok "no filesystem read of the record tree"
+fi
+refuse "no glob over the record tree" 'turns/\*' \
+  "a glob over turns/ enumerates the working tree rather than committed objects"
 
 # v1's wait re-ran forever on timeout, with the manual telling the agent to repeat indefinitely.
-refuse "the wait is not an unbounded loop" 'while (true|:)' \
+# `until false` is the same loop as `while true`, so both spellings are refused.
+refuse "the wait is not an unbounded loop" '(while (true|:)|until (false|:)|while \[ 1 \])' \
   "an unbounded wait leaves a participant that can never be fenced or observed"
+
+# --- prose is scanned too, for the idioms an agent would actually copy ---------------------------------
+# The refusals above scan only fenced bash, because the manual EXPLAINS these defects and a scan over
+# prose would fire on the sentences forbidding them. But an INSTRUCTION can live in prose, so prose is
+# scanned for the narrow shape of a filesystem read spelled inside backticks — which is how a reader
+# would copy it — while the explanatory sentences, which never use that shape, stay legal.
+PROSE="$(awk '/^```/ { c = !c; next } !c' "$SKILL")"
+if printf '%s\n' "$PROSE" | grep -Eq '`[^`]*(ls|find|cat) [^`]*turns[^`]*`'; then
+  nok "no filesystem read of the record tree in prose" \
+    "an inline command reads turns/ from the working tree: $(printf '%s\n' "$PROSE" | grep -Eo '`[^`]*(ls|find|cat) [^`]*turns[^`]*`' | head -1)"
+else
+  ok "no filesystem read of the record tree in prose"
+fi
+
+# The manual must give a POSITIVE recipe for enumerating committed records. Forbidding the working
+# tree without saying what to do instead leaves `ls turns/` as the path of least resistance.
+require_code "committed records can be enumerated" 'ls-tree' \
+  "the manual must show how to LIST committed records, not only how to read one"
 
 # --- what v2 requires instead -------------------------------------------------------------------------
 require_code "records are read from committed objects" 'git -C .* (show|cat-file) .*HEAD:' \
@@ -90,6 +124,54 @@ if [ -n "$ack_line" ] && [ -n "$work_line" ] && [ "$ack_line" -lt "$work_line" ]
   ok "the ACK section precedes the work section"
 else
   nok "the ACK section precedes the work section" "ACK at line ${ack_line:-none}, work at line ${work_line:-none}"
+fi
+
+# --- the committed/uncommitted distinction, executed rather than described ---------------------------
+# The manual's central claim is that an uncommitted receipt authorizes nothing. Asserting the words
+# is not the same as running the probe: these two fixtures hold BYTE-IDENTICAL receipts and differ
+# only in committedness, so the probe extracted from the manual must answer differently for them.
+#
+# The probe is taken from the manual itself, not restated here, so the two cannot drift apart.
+# The RECEIPT probe specifically -- the manual has another `cat-file -e` for TOPIC.md, and that one
+# is committed in both fixtures, so extracting it would make the two cases indistinguishable and the
+# test would pass while proving nothing. The line is an `if ...; then` fragment in the manual, so the
+# surrounding syntax is stripped to leave the bare command.
+PROBE="$(printf '%s\n' "$CODE" | grep -F 'cat-file -e' | grep -F 'EXPECTED_DISPATCH_REF' | head -1 \
+         | sed -e 's/^[[:space:]]*if[[:space:]]*//' -e 's/;[[:space:]]*then[[:space:]]*$//')"
+if [ -z "$PROBE" ]; then
+  nok "the manual's receipt probe is extractable" "no cat-file -e line found in the manual's code"
+else
+  ok "the manual's receipt probe is extractable"
+
+  FTMP="$(mktemp -d /tmp/agent-pairing-participant.XXXXXX)" \
+    || { echo "FATAL: temp allocation failed" >&2; exit 3; }
+  case "$FTMP" in /tmp/agent-pairing-participant.?*) ;; *) echo "FATAL: bad temp path" >&2; exit 3 ;; esac
+  trap 'rm -rf "$FTMP"' EXIT
+
+  probe_fixture() { # <fixture> <commit-turns?> -> 0 when the probe says "go"
+    d="$FTMP/$1"; mkdir -p "$d"
+    cp -R "$HERE/fixtures/$1"/. "$d"/ || return 2
+    rm -f "$d/.leave-uncommitted"
+    git -C "$d" init -q && git -C "$d" config user.name p && git -C "$d" config user.email p@t || return 2
+    if [ "$2" = yes ]; then git -C "$d" add -A; else git -C "$d" add TOPIC.md; fi
+    git -C "$d" commit -qm seed || return 2
+    TOPIC="$d"
+    HEAD_SHA="$(git -C "$TOPIC" rev-parse HEAD)" || return 2
+    EXPECTED_DISPATCH_REF=0004-t0001-a01-dispatch.md
+    eval "$PROBE" >/dev/null 2>&1
+  }
+
+  if probe_fixture committed-receipt yes; then
+    ok "the probe finds a COMMITTED receipt"
+  else
+    nok "the probe finds a COMMITTED receipt" "the manual's own probe did not resolve a committed receipt"
+  fi
+  if probe_fixture uncommitted-receipt no; then
+    nok "an UNCOMMITTED receipt authorizes nothing" \
+      "the manual's probe resolved a receipt that exists only in the working tree"
+  else
+    ok "an UNCOMMITTED receipt authorizes nothing"
+  fi
 fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

@@ -484,6 +484,12 @@ v2_schema_dispatch() { # <staged-file> <display-name>
   v2_dp_src="$(v2_fm_get "$v2_dp_f" receipt_source)"
   v2_in_list "$v2_dp_src" "$V2_RECEIPT_SOURCES" \
     || v2_fail BAD_RECEIPT_SOURCE "$v2_dp_n" "receipt_source=$v2_dp_src is not one of: $V2_RECEIPT_SOURCES"
+  # A receipt claiming owner-answer provenance must CITE the answer. Without the ref it asserts the
+  # owner materialized this dispatch while naming nobody, and it also slips past the owner-answer
+  # binding stage entirely, since that stage only inspects records that carry the field.
+  if [ "$v2_dp_src" = owner-answer ] && [ -z "$(v2_fm_get "$v2_dp_f" owner_answer_ref)" ]; then
+    v2_fail MISSING_KEY "$v2_dp_n" "receipt_source: owner-answer requires owner_answer_ref"
+  fi
 
   v2_dp_de="$(v2_fm_get "$v2_dp_f" dispatched_epoch)"
   v2_uint_value "$v2_dp_de" >/dev/null 2>&1 \
@@ -878,7 +884,7 @@ v2_check_captures() { # <topic>
 # --- result: a terminal status accountable to evidence -------------------------------------------------------
 # Task 6 owns the LINKAGE — which evidence a terminal status must cite. The status/reason matrix and
 # the result_sha rules are Task 8's port of the preserved v1 checks.
-V2_ACK_NULL_REASONS="ack-preflight-failed transport-lossy result-before-ack terminated-before-result dispatch-confirmed-absent never-dispatched"
+V2_ACK_NULL_REASONS="ack-preflight-failed transport-lossy result-before-ack terminated-before-result dispatch-confirmed-absent never-dispatched ack-timeout"
 
 v2_schema_result() { # <staged-file> <display-name>
   v2_rs_f="$1" v2_rs_n="$2"
@@ -1092,7 +1098,6 @@ v2_schema_close() { # <staged-file> <display-name>
 
 # --- cross-record owner rules -------------------------------------------------------------------------------
 v2_question_by_id() { # <question_id> -> staged path
-  awk -v k="$1" 'BEGIN { }' /dev/null
   for v2_qb_f in $(v2_files_of_kind owner-question); do
     [ "$(v2_fm_get "$v2_qb_f" question_id)" = "$1" ] && { printf '%s\n' "$v2_qb_f"; return; }
   done
@@ -1256,6 +1261,20 @@ v2_check_owner_answer_bindings() {
   done <"$V2_SORTED"
 }
 
+# A result whose REASON claims the owner confirmed something must cite an answer that actually
+# authorized it. Checking only that owner_answer_ref is non-empty let a result point at any answer at
+# all -- including `record-decision` -- and close a possibly-live attempt with nobody having
+# confirmed it absent or terminated.
+v2_require_authorizing_action() { # <staged-file> <name> <required-action>
+  v2_ra2_ref="$(v2_fm_get "$1" owner_answer_ref)"
+  [ -n "$v2_ra2_ref" ] || return 0          # MISSING_EVIDENCE owns the absent case
+  v2_ra2_p="$(v2_resolve_ref "$v2_ra2_ref" owner-answer)" || v2_ra2_p=""
+  [ -n "$v2_ra2_p" ] || return 0            # LINK_DANGLING owns the unresolvable case
+  v2_ra2_act="$(v2_fm_get "$v2_ra2_p" action)"
+  [ "$v2_ra2_act" = "$3" ] \
+    || v2_fail OWNER_ANSWER_MISMATCH "$2" "cites an answer with action=$v2_ra2_act, not $3; the owner authorized something else"
+}
+
 # --- the terminal-status matrix ------------------------------------------------------------------------------
 v2_check_result_matrix() {
   while read -r v2_rm_seq v2_rm_kind v2_rm_name v2_rm_file; do
@@ -1333,12 +1352,14 @@ v2_check_result_matrix() {
       dispatch-confirmed-absent)
         [ -n "$(v2_fm_get "$v2_rm_file" owner_answer_ref)" ] \
           || v2_fail MISSING_EVIDENCE "$v2_rm_name" "dispatch-confirmed-absent requires owner_answer_ref"
+        v2_require_authorizing_action "$v2_rm_file" "$v2_rm_name" dispatch-confirmed-absent
         { [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" dispatch)" -eq 0 ] \
           && [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" late)" -eq 0 ]; } \
           || v2_fail REASON_CONTRADICTED "$v2_rm_name" "dispatch-confirmed-absent with a receipt or late observation on file for this attempt" ;;
       terminated-before-result)
         [ -n "$(v2_fm_get "$v2_rm_file" owner_answer_ref)" ] \
           || v2_fail MISSING_EVIDENCE "$v2_rm_name" "terminated-before-result requires owner_answer_ref"
+        v2_require_authorizing_action "$v2_rm_file" "$v2_rm_name" dispatch-termination-confirmed
         [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" intent)" -ge 1 ] \
           || v2_fail REASON_CONTRADICTED "$v2_rm_name" "terminated-before-result with no intent on file: nothing was ever dispatched to terminate" ;;
     esac
@@ -1355,8 +1376,22 @@ v2_check_result_matrix() {
     # primary could record a timeout it never fenced, and the durable boundary becomes optional.
     case "$v2_rm_rs" in
       ack-timeout|work-timeout)
-        [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" fence-initiated)" -ge 1 ] \
-          || v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs requires a committed fence-initiated record for this attempt" ;;
+        v2_rm_fseq=""
+        while read -r v2_rm_s5 v2_rm_k5 v2_rm_n5 v2_rm_f5; do
+          [ -n "${v2_rm_s5:-}" ] || continue
+          [ "$v2_rm_k5" = fence-initiated ] || continue
+          [ "$(v2_fm_get "$v2_rm_f5" turn_id)" = "$v2_rm_t" ] || continue
+          [ "$(v2_fm_get "$v2_rm_f5" attempt_id)" = "$v2_rm_a" ] || continue
+          v2_rm_fseq="$v2_rm_s5"
+          break
+        done <"$V2_SORTED"
+        if [ -z "$v2_rm_fseq" ]; then
+          v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs requires a committed fence-initiated record for this attempt"
+        elif [ "$v2_rm_fseq" \> "$v2_rm_seq" ] || [ "$v2_rm_fseq" = "$v2_rm_seq" ]; then
+          # Counting is not ordering. A timeout asserted BEFORE its boundary was committed is the
+          # state change the fence exists to make durable, happening without it.
+          v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs precedes its own fence-initiated record ($v2_rm_fseq)"
+        fi ;;
     esac
   done <"$V2_SORTED"
 }
