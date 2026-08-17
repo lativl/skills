@@ -137,7 +137,14 @@ v2_first_unanswered_question() { # -> staged path, or empty
 # --- close ----------------------------------------------------------------------------------------------
 V2_ACTIONABLE_DISPATCH="dispatch-job-found dispatch-confirmed-absent dispatch-termination-confirmed"
 
-v2_close_is_cancelled() { # <close staged-file>
+# The seq of the answer that cancels a close, or empty. The FULL ordering is required:
+#
+#     close_seq  <  question_seq  <  answer_seq
+#
+# Checking only `question_seq > close_seq` let an answer that PRECEDES its own question dissolve a
+# durable close boundary and reopen dispatch — a misordered or forged record set could cancel a close
+# that had not been questioned yet.
+v2_cancelling_answer_seq() { # <close staged-file>
   v2_cc_id="$(v2_fm_get "$1" close_id)"
   v2_cc_seq="$(v2_fm_get "$1" record_seq)"
   for v2_cc_af in $(v2_files_of_kind owner-answer); do
@@ -148,9 +155,16 @@ v2_close_is_cancelled() { # <close staged-file>
     done
     [ -n "$v2_cc_qf" ] || continue
     [ "$(v2_fm_get "$v2_cc_qf" blocks)" = "CLOSING:$v2_cc_id" ] || continue
-    [ "$(v2_fm_get "$v2_cc_qf" record_seq)" \> "$v2_cc_seq" ] && return 0
+    v2_cc_qseq="$(v2_fm_get "$v2_cc_qf" record_seq)"
+    v2_cc_aseq="$(v2_fm_get "$v2_cc_af" record_seq)"
+    [ "$v2_cc_qseq" \> "$v2_cc_seq" ] && [ "$v2_cc_aseq" \> "$v2_cc_qseq" ] \
+      && { printf '%s\n' "$v2_cc_aseq"; return 0; }
   done
   return 1
+}
+
+v2_close_is_cancelled() { # <close staged-file>
+  v2_cancelling_answer_seq "$1" >/dev/null
 }
 
 # The newest close that has NOT been cancelled, found by scanning backward. "Last record wins" would
@@ -321,14 +335,22 @@ v2_check_close_postconditions() { # <close staged-file> -> sets V2_PC_ALL / V2_P
   elif [ -e "$V2_WT" ] || [ -L "$V2_WT" ]; then
     printf 'postcondition worktree-absent: FAIL\n'; V2_PC_ALL=no
   else
-    v2_cp_wl="$(v2_git "$v2_cp_root" worktree list --porcelain 2>/dev/null)" || v2_cp_wl=""
+    v2_cp_wl="$(v2_git "$v2_cp_root" worktree list --porcelain 2>/dev/null)"
+    if [ $? -ne 0 ]; then
+      printf 'postcondition worktree-absent: UNAVAILABLE\n'
+      V2_PC_ALL=no; V2_PC_UNVERIFIED="${V2_PC_UNVERIFIED}${V2_PC_UNVERIFIED:+,}worktree-absent"
+      v2_cp_wl_failed=yes
+    else
+      v2_cp_wl_failed=no
+    fi
     v2_cp_listed=no
     while read -r v2_cp_k v2_cp_v; do
       [ "${v2_cp_k:-}" = worktree ] && [ "$(v2_canon "$v2_cp_v")" = "$(v2_canon "$V2_WT")" ] && v2_cp_listed=yes
     done <<EOF
 $v2_cp_wl
 EOF
-    if [ "$v2_cp_listed" = yes ]; then printf 'postcondition worktree-absent: FAIL\n'; V2_PC_ALL=no
+    if [ "$v2_cp_wl_failed" = yes ]; then :   # already reported UNAVAILABLE above
+    elif [ "$v2_cp_listed" = yes ]; then printf 'postcondition worktree-absent: FAIL\n'; V2_PC_ALL=no
     else printf 'postcondition worktree-absent: PASS\n'; fi
   fi
 

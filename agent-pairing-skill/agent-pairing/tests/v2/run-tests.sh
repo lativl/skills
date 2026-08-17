@@ -474,6 +474,39 @@ if v2_group classification; then
   # every automatic action, so replay must not quietly continue the turn it asked about.
   v2_expect_live "an unanswered question about the open attempt blocks it too" \
     awaiting-owner-attempt AWAITING_OWNER
+
+  # --- forged record sets that must fail CLOSED ---------------------------------------------------
+  # Each of these classified cleanly at exit 0 before the close/owner validation stage existed. They
+  # are live topics because that is the only way to prove it: every one is an otherwise ordinary
+  # topic, and the defect is in what the records CLAIM about each other.
+
+  # The close arm outranks turn state, so a close over a live attempt silently ends its lease.
+  v2_expect_live_violation "a close may not be written over a live open attempt" \
+    close-over-live-attempt CLOSE_PRECONDITION
+  # The branch-at-final postcondition compares the branch against the close's OWN claim, so an
+  # unchecked claim launders an unexplained tip into CLOSED -- the state the deployment gate trusts.
+  v2_expect_live_violation "a close's final SHA must be the record-derived accepted SHA" \
+    close-forged-final-sha CLOSE_SHA_MISMATCH
+  # One answer marking two questions answered makes an unanswered owner question invisible, and the
+  # topic then reports IDLE -- "safe to dispatch" into a topic the owner is blocking.
+  v2_expect_live_violation "a question_id is unique" \
+    duplicate-question-id QUESTION_DUP
+  # Two attempts believing they hold the exclusive worktree lease is the design's named failure #1.
+  v2_expect_live_violation "only the newest assignment may be open" \
+    two-open-attempts OPEN_NOT_NEWEST
+  # close < question < answer, in full: a cancel ordered before its own question would otherwise
+  # dissolve a durable close boundary and reopen dispatch.
+  v2_expect_live_violation "a cancel-close cannot precede its own question" \
+    cancel-before-question LINK_ORDER
+  # A no-op is stationary BY DEFINITION. Naming a drifted tip turns an alarm into a routine
+  # remediation, and the quarantine arm believes the record.
+  v2_expect_live_violation "a REJECTED no-op may name only its own base" \
+    forged-no-op RESULT_SHA_RULE
+  v2_expect_live_violation "a REVIEW turn cannot move the tip" \
+    review-moved-tip RESULT_SHA_RULE
+  # A timeout is terminal only after its boundary is committed, or the durable fence is optional.
+  v2_expect_live_violation "a timeout result requires its committed fence" \
+    timeout-without-fence REASON_CONTRADICTED
 fi
 
 # --- render: deterministic, committed-only, and never destructive -------------------------------------
@@ -648,6 +681,36 @@ if v2_group templates; then
            -e 's/{{RESULT_SHA}}/2222222222222222222222222222222222222222/' \
            -e 's/{{OBSERVED_AT}}/2026-08-14T10:01:00Z/' \
            "$v2_tpl/result.md" >"$v2_t/turns/0007-t0001-a01-result.md"
+
+    # EVERY kind's template is instantiated, including the owner/close/fence/late ones. When those
+    # schemas were no-op stubs, instantiating only the kinds that HAD schemas made the stubs
+    # self-masking: the gate passed because nothing it built could exercise them.
+    v2_sub -e 's/{{RECORD_SEQ}}/0008/' -e 's/{{RECORDED_EPOCH}}/1070/' \
+           -e 's/{{TRIGGER}}/work-timeout/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{DISPATCH_REF}}/0004-t0001-a01-dispatch.md/' \
+           -e 's/{{ACK_REF}}/0005-t0001-a01-ack.md/' \
+           -e 's/{{JOB_ID}}/job-0001/' \
+           -e 's/{{DUE_EPOCH}}/4640/' -e 's/{{OBSERVED_EPOCH}}/4700/' \
+           "$v2_tpl/fence-initiated.md" >"$v2_t/turns/0008-t0001-a01-fence-initiated.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0009/' -e 's/{{RECORDED_EPOCH}}/1080/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{NAMED_SHA}}/null/' \
+           "$v2_tpl/late.md" >"$v2_t/turns/0009-t0001-a01-late-01.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0010/' -e 's/{{RECORDED_EPOCH}}/1090/' \
+           -e 's/{{QUESTION_ID}}/q-1/' -e 's/{{BLOCKS}}/general/' \
+           "$v2_tpl/owner-question.md" >"$v2_t/turns/0010-owner-question.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0011/' -e 's/{{RECORDED_EPOCH}}/1100/' \
+           -e 's/{{QUESTION_REF}}/q-1/' -e 's/{{ACTION}}/record-decision/' \
+           "$v2_tpl/owner-answer.md" >"$v2_t/turns/0011-owner-answer.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0012/' -e 's/{{RECORDED_EPOCH}}/1110/' \
+           -e 's/{{CLOSE_ID}}/close-0001/' \
+           -e 's/{{FINAL_ACCEPTED_SHA}}/2222222222222222222222222222222222222222/' \
+           "$v2_tpl/close.md" >"$v2_t/turns/0012-close.md"
 
     if grep -rl '{{[A-Z][A-Z0-9_]*}}' "$v2_t" >/dev/null 2>&1; then
       v2_nok "$v2_n_token" "surviving token in $(grep -rl '{{[A-Z][A-Z0-9_]*}}' "$v2_t" | tr '\n' ' ')"

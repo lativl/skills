@@ -391,11 +391,68 @@ job_id: job-recovered" ;;
       v2_live_close "$T" live 0008 1200 close-0001 "$C1" ;;
     closed)
       v2_live_close "$T" live 0008 1200 close-0001 "$C1" ;;
+    close-over-live-attempt)
+      # A close written while turn 2 is still open. The close arm OUTRANKS turn state in replay, so
+      # without a precondition this silently terminates a running agent's lease.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_close "$T" live 0009 1200 close-0001 "$C1" ;;
+    close-forged-final-sha)
+      # An unexplained commit at the tip, then a close naming THAT tip as the final accepted SHA.
+      # Without the fold comparison this launders drift into CLOSED — the state the deployment gate
+      # trusts.
+      ( cd "$W" && printf 'mystery\n' >src/mystery.txt && git add -A ) || return 1
+      v2_gc "$W" unexplained || return 1
+      v2_live_close "$T" live 0008 1200 close-0001 "$(git -C "$W" rev-parse HEAD)" ;;
+    duplicate-question-id)
+      # Two questions sharing one id: a single answer marks both answered, so an unanswered owner
+      # question becomes invisible and the topic reports IDLE.
+      v2_live_question "$T" live 0008 1100 q-1 general
+      v2_live_answer "$T" live 0009 1110 q-1 record-decision
+      sed -e 's/^record_seq: 0008$/record_seq: 0010/' -e 's/^recorded_epoch: 1100$/recorded_epoch: 1120/' \
+        "$T/turns/0008-owner-question.md" >"$T/turns/0010-owner-question.md" ;;
+    two-open-attempts)
+      # Two assignments with no result: two attempts believing they hold the exclusive worktree lease.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_assignment "$T" live 0010 1120 0003 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/" ;;
+    forged-no-op)
+      # A REJECTED no-op naming an UNEXPLAINED tip. A no-op is stationary by definition, so it may
+      # name only its own base; letting it name a drifted tip flips replay from UNRECORDED_DRIFT
+      # (alarm) to REMEDIATION_REQUIRED (mechanical) -- and the quarantine arm trusts the record.
+      ( cd "$W" && printf 'mystery\n' >src/mystery.txt && git add -A ) || return 1
+      v2_gc "$W" unexplained || return 1
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      v2_live_ack "$T" live 0011 1130 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md 0010-t0002-a01-dispatch.md job-2 tok-2 "$C1"
+      v2_live_capture "$T" live 0012 1140 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md 0011-t0002-a01-ack.md 'No change.'
+      v2_live_result "$T" live 0013 1150 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md 0011-t0002-a01-ack.md 0012-t0002-a01-result-capture.md REJECTED no-op-result "$(git -C "$W" rev-parse HEAD)" ;;
+    review-moved-tip)
+      # A REVIEW turn is stationary by contract: it reviews a snapshot and may not move it.
+      v2_live_assignment "$T" live 0008 1100 0002 01 REVIEW "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 REVIEW 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 REVIEW 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      v2_live_ack "$T" live 0011 1130 0002 01 REVIEW 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md 0010-t0002-a01-dispatch.md job-2 tok-2 "$C1"
+      v2_live_capture "$T" live 0012 1140 0002 01 REVIEW 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md 0011-t0002-a01-ack.md 'Reviewed.'
+      v2_live_result "$T" live 0013 1150 0002 01 REVIEW 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md 0011-t0002-a01-ack.md 0012-t0002-a01-result-capture.md VERIFIED '' 3333333333333333333333333333333333333333 ;;
+    timeout-without-fence)
+      # A timeout terminal status with no committed fence: the durable boundary would be optional.
+      v2_live_assignment "$T" live 0008 1100 0002 01 NORMAL "$C1" pair/live "$W" "$R/.git" "src/"
+      v2_live_intent "$T" live 0009 1110 0002 01 NORMAL 0008-t0002-a01-assignment.md tok-2 0010-t0002-a01-dispatch.md
+      v2_live_dispatch "$T" live 0010 1120 0002 01 NORMAL 0008-t0002-a01-assignment.md 0009-t0002-a01-intent.md job-2
+      v2_live_result "$T" live 0011 1130 0002 01 NORMAL 0008-t0002-a01-assignment.md 0010-t0002-a01-dispatch.md null null ABORTED ack-timeout null ;;
+    cancel-before-question)
+      # A cancel answer ordered BEFORE its own question. Checking only question>close let a forged
+      # ordering dissolve a durable close boundary and reopen dispatch.
+      v2_live_answer "$T" live 0008 1100 q-c cancel-close
+      v2_live_close "$T" live 0009 1110 close-0001 "$C1"
+      v2_live_question "$T" live 0010 1120 q-c "CLOSING:close-0001" ;;
   esac
 
   git -C "$T" add -A && v2_gc "$T" records || return 1
 
-  if [ "$v2_ml_mode" = closed ]; then
+  case "$v2_ml_mode" in closed|close-over-live-attempt|close-forged-final-sha) v2_ml_finalize=yes ;; *) v2_ml_finalize=no ;; esac
+  if [ "$v2_ml_finalize" = yes ]; then
     # The close postconditions, performed for real: the worktree is removed and deregistered, the
     # branch stands at the final accepted SHA, and THREAD.md is committed saying so.
     git -C "$R" worktree remove --force "$W" >/dev/null 2>&1 || return 1
@@ -408,15 +465,38 @@ job_id: job-recovered" ;;
 }
 
 # Assert a live mode's exact classification.
+#
+# NOTE for anyone extending this: `v2_make_live` sets V2_LIVE_T/W/R/B0/C1 as GLOBALS and also prints
+# the topic path. Calling it as `$(v2_make_live …)` runs it in a subshell, so those globals never
+# reach you — read `$V2_LIVE_T` after a direct call instead. Every mode-composing helper below relies
+# on that, and the trap is easy to fall into.
 v2_expect_live() { # <name> <mode> <classification>
   v2_el_n="$1" v2_el_m="$2" v2_el_c="$3"
   : >"$V2_OUT"
-  v2_el_t="$(v2_make_live "$v2_el_m")" || { v2_nok "$v2_el_n" "cannot build live mode '$v2_el_m'"; return; }
+  v2_make_live "$v2_el_m" >/dev/null || { v2_nok "$v2_el_n" "cannot build live mode '$v2_el_m'"; return; }
+  v2_el_t="$V2_LIVE_T"
   "$V2_VALIDATE" --check "$v2_el_t" >"$V2_OUT" 2>&1
   v2_el_rc=$?
   if grep -Fx "classification: $v2_el_c" "$V2_OUT" >/dev/null; then
     v2_ok "$v2_el_n"
   else
     v2_nok "$v2_el_n" "expected 'classification: $v2_el_c' (rc $v2_el_rc); got: $(grep -m1 -E '^(classification|VIOLATION|FATAL)' "$V2_OUT")"
+  fi
+}
+
+# Assert a live mode is refused with exactly one violation code. The live builder is what makes these
+# provable: each forged record set is otherwise a completely ordinary topic.
+v2_expect_live_violation() { # <name> <mode> <code>
+  v2_lv_n="$1" v2_lv_m="$2" v2_lv_c="$3"
+  : >"$V2_OUT"
+  v2_make_live "$v2_lv_m" >/dev/null || { v2_nok "$v2_lv_n" "cannot build live mode '$v2_lv_m'"; return; }
+  "$V2_VALIDATE" --check "$V2_LIVE_T" >"$V2_OUT" 2>&1
+  v2_lv_rc=$?
+  if [ "$v2_lv_rc" -ne 2 ]; then
+    v2_nok "$v2_lv_n" "expected exit 2; got $v2_lv_rc: $(grep -m1 -E '^(classification|VIOLATION|FATAL)' "$V2_OUT")"
+  elif grep -F "VIOLATION $v2_lv_c" "$V2_OUT" >/dev/null; then
+    v2_ok "$v2_lv_n"
+  else
+    v2_nok "$v2_lv_n" "expected VIOLATION $v2_lv_c; got: $(grep -m1 VIOLATION "$V2_OUT")"
   fi
 }

@@ -239,6 +239,11 @@ v2_check_captures "$V2_TOPIC"
 v2_check_results
 v2_check_fences
 v2_check_topic_agreement
+v2_check_attempt_uniqueness
+v2_check_owner_records
+v2_check_owner_answer_bindings
+v2_check_result_matrix
+v2_check_close_lifecycle
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
 

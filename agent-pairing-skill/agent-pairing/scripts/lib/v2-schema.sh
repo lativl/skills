@@ -1026,6 +1026,440 @@ v2_schema_late() { # <staged-file> <display-name>
     v2_is_sha "$v2_lt_sha" || v2_fail BAD_SHA "$v2_lt_n" "named_sha=$v2_lt_sha"
   fi
 }
-v2_schema_owner_question() { :; }   # Task 8
-v2_schema_owner_answer()   { :; }   # Task 8
-v2_schema_close()          { :; }   # Task 8
+# --- owner questions, owner answers, and the close lifecycle ------------------------------------------------
+#
+# These are the v1 rules this protocol keeps, ported with their reasons. The owner is the escape
+# hatch for everything replay cannot decide, so a forged or misordered owner record is not a cosmetic
+# defect: it manufactures authorization that nobody gave.
+
+V2_STATUSES="VERIFIED REJECTED SUPERSEDED ABORTED"
+# v2 adds the delivery-era reasons to v1's sets. Each list is explicit rather than derived, so adding
+# a reason later forces a membership decision here instead of silently opening a hole.
+V2_ABORTED_REASONS="never-dispatched dispatch-confirmed-absent terminated-before-result transport-lossy ack-timeout work-timeout other"
+V2_SUPERSEDED_REASONS="replaced-by-retry collision other"
+V2_REJECTED_REASONS="verification-failed review-failed no-op-result out-of-scope-changes patch-apply-failed agent-declined-with-question residue-after-termination ack-preflight-failed result-before-ack other"
+# A no-commit failure may not NAME a commit, and a commit-bearing reason may not carry null.
+V2_COMMIT_BEARING_REASONS="no-op-result out-of-scope-changes"
+V2_SHA_FORBIDDEN_REASONS="patch-apply-failed agent-declined-with-question ack-preflight-failed"
+# Every reason whose text implies the job EXECUTED requires a dispatch receipt on file: intent is
+# ordered strictly before dispatch, so a receiptless attempt disproves any post-dispatch claim.
+V2_DISPATCH_REQUIRED_REASONS="transport-lossy verification-failed review-failed no-op-result patch-apply-failed agent-declined-with-question ack-preflight-failed result-before-ack ack-timeout work-timeout"
+V2_DISPATCH_OR_OWNER_ANSWER_REASONS="residue-after-termination out-of-scope-changes"
+
+V2_GENERAL_ACTIONS="authorize-remediation authorize-cleanup authorize-close cancel-close record-decision other"
+V2_DISPATCH_ACTIONS="dispatch-job-found dispatch-confirmed-absent dispatch-termination-confirmed dispatch-unresolved"
+
+v2_schema_owner_question() { # <staged-file> <display-name>
+  v2_oq_f="$1" v2_oq_n="$2"
+  for v2_oq_k in question_id blocks; do
+    v2_fm_has "$v2_oq_f" "$v2_oq_k" || { v2_fail MISSING_KEY "$v2_oq_n" "missing $v2_oq_k"; return 1; }
+  done
+  [ -n "$(v2_fm_get "$v2_oq_f" question_id)" ] \
+    || v2_fail QUESTION_ID "$v2_oq_n" "question_id is empty"
+  # `blocks` has three legal shapes. Only text that LOOKS like a malformed attempt reference is
+  # rejected — a free-form general value is never required to avoid that prefix. Without this, a
+  # typo like `t001-a1` falls through to the general branch and legalizes a GENERAL answer where a
+  # DISPATCH answer was meant.
+  v2_oq_b="$(v2_fm_get "$v2_oq_f" blocks)"
+  case "$v2_oq_b" in
+    t[0-9][0-9][0-9][0-9]-a[0-9][0-9]) ;;
+    CLOSING:?*) ;;
+    t[0-9]*) v2_fail BLOCKS_SHAPE "$v2_oq_n" "blocks='$v2_oq_b' looks like a malformed attempt reference" ;;
+    '') v2_fail BLOCKS_SHAPE "$v2_oq_n" "blocks is empty" ;;
+    *) ;;
+  esac
+}
+
+v2_schema_owner_answer() { # <staged-file> <display-name>
+  v2_oa_f="$1" v2_oa_n="$2"
+  for v2_oa_k in question_ref action; do
+    v2_fm_has "$v2_oa_f" "$v2_oa_k" || { v2_fail MISSING_KEY "$v2_oa_n" "missing $v2_oa_k"; return 1; }
+  done
+  v2_oa_act="$(v2_fm_get "$v2_oa_f" action)"
+  v2_in_list "$v2_oa_act" "$V2_GENERAL_ACTIONS" || v2_in_list "$v2_oa_act" "$V2_DISPATCH_ACTIONS" \
+    || v2_fail BAD_ACTION "$v2_oa_n" "action=$v2_oa_act is not a recognized owner action"
+}
+
+v2_schema_close() { # <staged-file> <display-name>
+  v2_cl_f="$1" v2_cl_n="$2"
+  for v2_cl_k in close_id final_accepted_sha; do
+    v2_fm_has "$v2_cl_f" "$v2_cl_k" || { v2_fail MISSING_KEY "$v2_cl_n" "missing $v2_cl_k"; return 1; }
+  done
+  [ -n "$(v2_fm_get "$v2_cl_f" close_id)" ] || v2_fail CLOSE_ID "$v2_cl_n" "close_id is empty"
+  v2_is_sha "$(v2_fm_get "$v2_cl_f" final_accepted_sha)" \
+    || v2_fail BAD_SHA "$v2_cl_n" "final_accepted_sha is not a 40-character hex SHA"
+}
+
+# --- cross-record owner rules -------------------------------------------------------------------------------
+v2_question_by_id() { # <question_id> -> staged path
+  awk -v k="$1" 'BEGIN { }' /dev/null
+  for v2_qb_f in $(v2_files_of_kind owner-question); do
+    [ "$(v2_fm_get "$v2_qb_f" question_id)" = "$1" ] && { printf '%s\n' "$v2_qb_f"; return; }
+  done
+}
+
+v2_check_owner_records() {
+  # A question_id must be UNIQUE. Two questions sharing one id let a single answer mark both
+  # answered, so an unanswered owner question becomes invisible and the topic reports IDLE — "safe
+  # to dispatch" into a topic the owner is blocking.
+  for v2_or_id in $(for v2_or_q in $(v2_files_of_kind owner-question); do v2_fm_get "$v2_or_q" question_id; done \
+                    | LC_ALL=C sort | uniq -d); do
+    v2_fail QUESTION_DUP "turns/" "question_id '$v2_or_id' is used by more than one question"
+  done
+  for v2_or_id in $(for v2_or_c in $(v2_files_of_kind close); do v2_fm_get "$v2_or_c" close_id; done \
+                    | LC_ALL=C sort | uniq -d); do
+    v2_fail CLOSE_ID_DUP "turns/" "close_id '$v2_or_id' is not unique; cancellation would be ambiguous"
+  done
+
+  # One question, at most one answer.
+  for v2_or_q in $(v2_files_of_kind owner-question); do
+    v2_or_qid="$(v2_fm_get "$v2_or_q" question_id)"
+    v2_or_n=0
+    for v2_or_a in $(v2_files_of_kind owner-answer); do
+      [ "$(v2_fm_get "$v2_or_a" question_ref)" = "$v2_or_qid" ] && v2_or_n=$((v2_or_n + 1))
+    done
+    [ "$v2_or_n" -le 1 ] || v2_fail ANSWER_DUP "$(v2_fm_get "$v2_or_q" record_seq)" "question '$v2_or_qid' has $v2_or_n answers"
+  done
+
+  while read -r v2_or_seq v2_or_kind v2_or_name v2_or_file; do
+    [ -n "${v2_or_seq:-}" ] || continue
+    [ "$v2_or_kind" = owner-answer ] || continue
+    v2_or_qref="$(v2_fm_get "$v2_or_file" question_ref)"
+    v2_or_qf="$(v2_question_by_id "$v2_or_qref")"
+    if [ -z "$v2_or_qf" ]; then
+      v2_fail ANSWER_DANGLING "$v2_or_name" "question_ref '$v2_or_qref' resolves to no question"
+      continue
+    fi
+    v2_or_qseq="$(v2_fm_get "$v2_or_qf" record_seq)"
+    # An append-only log cannot be authorized by its own future.
+    [ "$v2_or_seq" \> "$v2_or_qseq" ] \
+      || v2_fail LINK_ORDER "$v2_or_name" "an answer must follow the question it answers ($v2_or_qseq)"
+
+    v2_or_act="$(v2_fm_get "$v2_or_file" action)"
+    v2_or_blocks="$(v2_fm_get "$v2_or_qf" blocks)"
+    case "$v2_or_blocks" in
+      t[0-9][0-9][0-9][0-9]-a[0-9][0-9]) v2_or_ctx=attempt ;;
+      CLOSING:*) v2_or_ctx=close ;;
+      *) v2_or_ctx=other ;;
+    esac
+
+    if v2_in_list "$v2_or_act" "$V2_DISPATCH_ACTIONS"; then
+      [ "$v2_or_ctx" = attempt ] \
+        || v2_fail ACTION_CONTEXT "$v2_or_name" "$v2_or_act answers a question blocking '$v2_or_blocks', not an attempt"
+      case "$v2_or_act" in
+        dispatch-job-found)
+          { [ -n "$(v2_fm_get "$v2_or_file" transport)" ] && [ -n "$(v2_fm_get "$v2_or_file" job_id)" ]; } \
+            || v2_fail MISSING_EVIDENCE "$v2_or_name" "dispatch-job-found requires transport and job_id" ;;
+        dispatch-confirmed-absent|dispatch-termination-confirmed)
+          [ -n "$(v2_fm_get "$v2_or_file" evidence)" ] \
+            || v2_fail MISSING_EVIDENCE "$v2_or_name" "$v2_or_act requires captured evidence" ;;
+      esac
+    else
+      [ "$v2_or_ctx" = attempt ] \
+        && v2_fail ACTION_CONTEXT "$v2_or_name" "$v2_or_act is not a legal answer to a DISPATCH_UNKNOWN question"
+      if [ "$v2_or_ctx" = close ]; then
+        # A close boundary is durable. `cancel-close` is the ONLY thing that may resolve a question
+        # blocking one; anything else would let an unrelated decision dissolve it.
+        case "$v2_or_act" in
+          cancel-close) ;;
+          *) v2_fail ACTION_CONTEXT "$v2_or_name" "$v2_or_act may not resolve a CLOSING question" ;;
+        esac
+      fi
+      if [ "$v2_or_act" = cancel-close ]; then
+        [ "$v2_or_ctx" = close ] \
+          || v2_fail ACTION_CONTEXT "$v2_or_name" "cancel-close requires a question blocking CLOSING:<close_id>"
+        if [ "$v2_or_ctx" = close ]; then
+          v2_or_cid="${v2_or_blocks#CLOSING:}"
+          v2_or_found=no
+          for v2_or_cf in $(v2_files_of_kind close); do
+            [ "$(v2_fm_get "$v2_or_cf" close_id)" = "$v2_or_cid" ] || continue
+            v2_or_found=yes
+            [ "$v2_or_qseq" \> "$(v2_fm_get "$v2_or_cf" record_seq)" ] \
+              || v2_fail LINK_ORDER "$v2_or_name" "the close being cancelled must precede its own cancelling question"
+          done
+          [ "$v2_or_found" = yes ] \
+            || v2_fail ACTION_CONTEXT "$v2_or_name" "cancel-close names unknown close_id '$v2_or_cid'"
+        fi
+      fi
+      [ "$v2_or_act" = other ] && { v2_body_nonempty "$v2_or_file" \
+        || v2_fail MISSING_EVIDENCE "$v2_or_name" "action: other requires an explanation"; }
+    fi
+  done <"$V2_SORTED"
+}
+
+# A record citing an owner answer must bind that authorization on every dimension: WHEN (the answer
+# already exists), WHOSE attempt, WHAT it authorized, and WHETHER the action authorizes anything at
+# all. Checking only the values let a receipt cite a FUTURE answer, another attempt's answer, or an
+# answer that authorizes nothing.
+v2_check_owner_answer_bindings() {
+  while read -r v2_ob_seq v2_ob_kind v2_ob_name v2_ob_file; do
+    [ -n "${v2_ob_seq:-}" ] || continue
+    v2_ob_ref="$(v2_fm_get "$v2_ob_file" owner_answer_ref)"
+    [ -n "$v2_ob_ref" ] || continue
+    v2_ob_ap="$(v2_resolve_ref "$v2_ob_ref" owner-answer)" || v2_ob_ap=""
+    if [ -z "$v2_ob_ap" ]; then
+      v2_ref_target_already_faulted "$v2_ob_ref" && continue
+      v2_fail LINK_DANGLING "$v2_ob_name" "owner_answer_ref '$v2_ob_ref' resolves to no owner-answer record"
+      continue
+    fi
+    [ "$v2_ob_seq" \> "$(v2_fm_get "$v2_ob_ap" record_seq)" ] \
+      || v2_fail OWNER_ANSWER_ORDER "$v2_ob_name" "cites answer '$v2_ob_ref', which does not precede it"
+
+    v2_ob_act="$(v2_fm_get "$v2_ob_ap" action)"
+    # One answer authorizes ONE attempt — the tuple its question named. Scoped to the dispatch
+    # actions on purpose: a remediation assignment legitimately cites an answer whose question
+    # blocked the DEAD attempt, so a universal tuple rule would reject a legal record.
+    if v2_in_list "$v2_ob_act" "$V2_ACTIONABLE_DISPATCH"; then
+      v2_ob_qf="$(v2_question_by_id "$(v2_fm_get "$v2_ob_ap" question_ref)")"
+      if [ -n "$v2_ob_qf" ]; then
+        [ "t$(v2_fm_get "$v2_ob_file" turn_id)-a$(v2_fm_get "$v2_ob_file" attempt_id)" = "$(v2_fm_get "$v2_ob_qf" blocks)" ] \
+          || v2_fail OWNER_ANSWER_TUPLE "$v2_ob_name" "cites an answer authorizing $(v2_fm_get "$v2_ob_qf" blocks), not this attempt"
+      fi
+    fi
+
+    case "$v2_ob_act" in
+      dispatch-job-found)
+        [ "$(v2_fm_get "$v2_ob_file" kind)" = dispatch ] \
+          || v2_fail OWNER_ANSWER_MISMATCH "$v2_ob_name" "dispatch-job-found is materialized by a dispatch receipt"
+        [ "$(v2_fm_get "$v2_ob_file" receipt_source)" = owner-answer ] \
+          || v2_fail OWNER_ANSWER_MISMATCH "$v2_ob_name" "receipt_source must be owner-answer"
+        [ "$(v2_fm_get "$v2_ob_file" job_id)" = "$(v2_fm_get "$v2_ob_ap" job_id)" ] \
+          || v2_fail OWNER_ANSWER_MISMATCH "$v2_ob_name" "job_id differs from the authorized job_id" ;;
+      dispatch-confirmed-absent|dispatch-termination-confirmed)
+        case "$v2_ob_act" in
+          dispatch-confirmed-absent) v2_ob_want=dispatch-confirmed-absent ;;
+          *) v2_ob_want=terminated-before-result ;;
+        esac
+        [ "$(v2_fm_get "$v2_ob_file" kind)" = result ] \
+          || { v2_fail OWNER_ANSWER_MISMATCH "$v2_ob_name" "$v2_ob_act is materialized by a result"; continue; }
+        v2_ob_st="$(v2_fm_get "$v2_ob_file" status)"
+        v2_ob_rs="$(v2_fm_get "$v2_ob_file" reason)"
+        # TWO truthful materializations: the worktree gate PASSING (ABORTED + the matching reason) or
+        # that same gate FAILING on this owner-authorized attempt. Checking only the pass path made
+        # the gate-failure record — the crash-recovery path this protocol exists for — unrecordable.
+        if [ "$v2_ob_st" = ABORTED ] && [ "$v2_ob_rs" = "$v2_ob_want" ]; then :
+        elif [ "$v2_ob_st" = REJECTED ] && v2_in_list "$v2_ob_rs" "$V2_DISPATCH_OR_OWNER_ANSWER_REASONS"; then :
+        else
+          v2_fail OWNER_ANSWER_MISMATCH "$v2_ob_name" "$v2_ob_act must materialize as ABORTED+$v2_ob_want or REJECTED+{$V2_DISPATCH_OR_OWNER_ANSWER_REASONS}"
+        fi ;;
+      dispatch-unresolved)
+        v2_fail OWNER_ANSWER_UNAUTHORIZED "$v2_ob_name" "dispatch-unresolved authorizes no record; state remains DISPATCH_UNKNOWN" ;;
+      authorize-remediation|authorize-cleanup|authorize-close|cancel-close|record-decision|other)
+        # General authorizations prescribe no materializing record, so only the ordering rule applies
+        # — EXCEPT a receipt claiming owner-answer provenance, which only dispatch-job-found produces.
+        if [ "$(v2_fm_get "$v2_ob_file" kind)" = dispatch ] \
+           && [ "$(v2_fm_get "$v2_ob_file" receipt_source)" = owner-answer ]; then
+          v2_fail OWNER_ANSWER_MISMATCH "$v2_ob_name" "a receipt with receipt_source: owner-answer cites action=$v2_ob_act, not dispatch-job-found"
+        fi ;;
+      *) v2_fail OWNER_ANSWER_UNAUTHORIZED "$v2_ob_name" "action=$v2_ob_act cannot authorize a record" ;;
+    esac
+  done <"$V2_SORTED"
+}
+
+# --- the terminal-status matrix ------------------------------------------------------------------------------
+v2_check_result_matrix() {
+  while read -r v2_rm_seq v2_rm_kind v2_rm_name v2_rm_file; do
+    [ -n "${v2_rm_seq:-}" ] || continue
+    [ "$v2_rm_kind" = result ] || continue
+    v2_rm_ap="$(v2_resolve_ref "$(v2_fm_get "$v2_rm_file" assignment_ref)" assignment)" || continue
+    v2_rm_st="$(v2_fm_get "$v2_rm_file" status)"
+    v2_rm_rs="$(v2_fm_get "$v2_rm_file" reason)"
+    v2_rm_sha="$(v2_fm_get "$v2_rm_file" result_sha)"
+    v2_rm_tk="$(v2_fm_get "$v2_rm_file" turn_kind)"
+    v2_rm_base="$(v2_fm_get "$v2_rm_ap" base_sha)"
+    v2_rm_t="$(v2_fm_get "$v2_rm_file" turn_id)"
+    v2_rm_a="$(v2_fm_get "$v2_rm_file" attempt_id)"
+
+    v2_in_list "$v2_rm_st" "$V2_STATUSES" \
+      || { v2_fail BAD_STATUS "$v2_rm_name" "status=$v2_rm_st is not one of: $V2_STATUSES"; continue; }
+    if [ "$v2_rm_sha" != null ]; then
+      v2_is_sha "$v2_rm_sha" || v2_fail BAD_SHA "$v2_rm_name" "result_sha=$v2_rm_sha"
+    fi
+
+    case "$v2_rm_st" in
+      VERIFIED)
+        [ -z "$v2_rm_rs" ] || v2_fail BAD_REASON "$v2_rm_name" "VERIFIED carries no reason (got $v2_rm_rs)"
+        # A REVIEW turn is STATIONARY by contract: it reviews a snapshot and may not move it.
+        if [ "$v2_rm_tk" = REVIEW ]; then
+          [ "$v2_rm_sha" = "$v2_rm_base" ] \
+            || v2_fail RESULT_SHA_RULE "$v2_rm_name" "a VERIFIED REVIEW result_sha must equal base_sha"
+        else
+          { v2_is_sha "$v2_rm_sha" && [ "$v2_rm_sha" != "$v2_rm_base" ]; } \
+            || v2_fail RESULT_SHA_RULE "$v2_rm_name" "$v2_rm_tk VERIFIED must name a non-stationary commit"
+        fi ;;
+      ABORTED)
+        v2_in_list "$v2_rm_rs" "$V2_ABORTED_REASONS" \
+          || v2_fail BAD_REASON "$v2_rm_name" "reason=$v2_rm_rs is not an ABORTED reason"
+        # ABORTED requires tip = HEAD = base and a clean tree: nothing landed, so there is no commit
+        # to name, and a SHA here contradicts the record itself.
+        [ "$v2_rm_sha" = null ] \
+          || v2_fail RESULT_SHA_RULE "$v2_rm_name" "ABORTED must carry result_sha: null (got $v2_rm_sha)" ;;
+      SUPERSEDED)
+        v2_in_list "$v2_rm_rs" "$V2_SUPERSEDED_REASONS" \
+          || v2_fail BAD_REASON "$v2_rm_name" "reason=$v2_rm_rs is not a SUPERSEDED reason" ;;
+      REJECTED)
+        v2_in_list "$v2_rm_rs" "$V2_REJECTED_REASONS" \
+          || v2_fail BAD_REASON "$v2_rm_name" "reason=$v2_rm_rs is not a REJECTED reason"
+        if [ "$v2_rm_sha" = null ] && v2_in_list "$v2_rm_rs" "$V2_COMMIT_BEARING_REASONS"; then
+          v2_fail RESULT_SHA_RULE "$v2_rm_name" "null result_sha is not legal for REJECTED:$v2_rm_rs"
+        fi
+        if [ "$v2_rm_sha" != null ] && v2_in_list "$v2_rm_rs" "$V2_SHA_FORBIDDEN_REASONS"; then
+          v2_fail RESULT_SHA_RULE "$v2_rm_name" "REJECTED:$v2_rm_rs must carry result_sha: null (got $v2_rm_sha)"
+        fi
+        # A no-op is stationary BY DEFINITION, so it may name only its own base. A forged no-op SHA
+        # equal to an unexplained tip flips replay from UNRECORDED_DRIFT (alarm) to
+        # REMEDIATION_REQUIRED (mechanical) — alarm-softening, and the quarantine arm trusts it.
+        if [ "$v2_rm_sha" != null ] && [ "$v2_rm_rs" = no-op-result ] && [ "$v2_rm_sha" != "$v2_rm_base" ]; then
+          v2_fail RESULT_SHA_RULE "$v2_rm_name" "REJECTED:no-op-result must name base_sha (got $v2_rm_sha)"
+        fi ;;
+    esac
+
+    # A REVIEW turn forbids commits for the whole turn kind, in every status.
+    if [ "$v2_rm_tk" = REVIEW ] && [ "$v2_rm_st" != VERIFIED ] \
+       && [ "$v2_rm_sha" != null ] && [ "$v2_rm_sha" != "$v2_rm_base" ]; then
+      v2_fail RESULT_SHA_RULE "$v2_rm_name" "a REVIEW result_sha must be base_sha or null (got $v2_rm_sha)"
+    fi
+    if [ "$v2_rm_rs" = other ] && ! v2_body_nonempty "$v2_rm_file"; then
+      v2_fail MISSING_EVIDENCE "$v2_rm_name" "reason: other requires explanatory body text"
+    fi
+
+    # Reason-class closure: a reason claiming the job executed must have a receipt on file.
+    case "$v2_rm_rs" in
+      never-dispatched)
+        { [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" intent)" -eq 0 ] \
+          && [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" dispatch)" -eq 0 ] \
+          && [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" late)" -eq 0 ]; } \
+          || v2_fail REASON_CONTRADICTED "$v2_rm_name" "never-dispatched with a committed intent, receipt, or late observation for this attempt" ;;
+      dispatch-confirmed-absent)
+        [ -n "$(v2_fm_get "$v2_rm_file" owner_answer_ref)" ] \
+          || v2_fail MISSING_EVIDENCE "$v2_rm_name" "dispatch-confirmed-absent requires owner_answer_ref"
+        { [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" dispatch)" -eq 0 ] \
+          && [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" late)" -eq 0 ]; } \
+          || v2_fail REASON_CONTRADICTED "$v2_rm_name" "dispatch-confirmed-absent with a receipt or late observation on file for this attempt" ;;
+      terminated-before-result)
+        [ -n "$(v2_fm_get "$v2_rm_file" owner_answer_ref)" ] \
+          || v2_fail MISSING_EVIDENCE "$v2_rm_name" "terminated-before-result requires owner_answer_ref"
+        [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" intent)" -ge 1 ] \
+          || v2_fail REASON_CONTRADICTED "$v2_rm_name" "terminated-before-result with no intent on file: nothing was ever dispatched to terminate" ;;
+    esac
+    if v2_in_list "$v2_rm_rs" "$V2_DISPATCH_REQUIRED_REASONS"; then
+      [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" dispatch)" -ge 1 ] \
+        || v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs implies the job executed, but no receipt is on file for this attempt"
+    fi
+    if v2_in_list "$v2_rm_rs" "$V2_DISPATCH_OR_OWNER_ANSWER_REASONS"; then
+      { [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" dispatch)" -ge 1 ] \
+        || [ -n "$(v2_resolve_ref "$(v2_fm_get "$v2_rm_file" owner_answer_ref)" owner-answer 2>/dev/null)" ]; } \
+        || v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs implies execution but has neither a receipt nor a resolvable owner_answer_ref"
+    fi
+    # A fence-derived timeout is terminal only AFTER the boundary is committed. Without this, a
+    # primary could record a timeout it never fenced, and the durable boundary becomes optional.
+    case "$v2_rm_rs" in
+      ack-timeout|work-timeout)
+        [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" fence-initiated)" -ge 1 ] \
+          || v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs requires a committed fence-initiated record for this attempt" ;;
+    esac
+  done <"$V2_SORTED"
+}
+
+# --- the exclusive worktree lease -----------------------------------------------------------------------------
+v2_check_attempt_uniqueness() {
+  # At most one of each kind per attempt. Two dispatches for one attempt is two jobs against one
+  # lease, which is the design's named failure #1.
+  for v2_au_k in assignment intent dispatch ack result; do
+    for v2_au_ta in $(while read -r v2_au_s v2_au_kk v2_au_n v2_au_f; do
+                        [ -n "${v2_au_s:-}" ] || continue
+                        [ "$v2_au_kk" = "$v2_au_k" ] || continue
+                        printf 't%s-a%s\n' "$(v2_fm_get "$v2_au_f" turn_id)" "$(v2_fm_get "$v2_au_f" attempt_id)"
+                      done <"$V2_SORTED" | LC_ALL=C sort | uniq -d); do
+      v2_fail MULTI_PER_ATTEMPT "turns/" "more than one $v2_au_k for attempt $v2_au_ta"
+    done
+  done
+
+  # An idempotency token identifies one dispatch attempt. Reusing it makes two attempts
+  # indistinguishable to a participant deduplicating on it.
+  for v2_au_tok in $(for v2_au_i in $(v2_files_of_kind intent); do v2_fm_get "$v2_au_i" idempotency_token; done \
+                     | LC_ALL=C sort | uniq -d); do
+    v2_fail TOKEN_DUP "turns/" "idempotency_token '$v2_au_tok' is reused"
+  done
+
+  # ONE open attempt. An older assignment with no result while a newer one exists means two attempts
+  # believe they hold the worktree — and replay, which reports only the newest, would hide the older
+  # one entirely.
+  v2_au_newest=""
+  while read -r v2_au_s v2_au_kk v2_au_n v2_au_f; do
+    [ -n "${v2_au_s:-}" ] || continue
+    [ "$v2_au_kk" = assignment ] && v2_au_newest="$v2_au_n"
+  done <"$V2_SORTED"
+  while read -r v2_au_s v2_au_kk v2_au_n v2_au_f; do
+    [ -n "${v2_au_s:-}" ] || continue
+    [ "$v2_au_kk" = assignment ] || continue
+    [ "$v2_au_n" = "$v2_au_newest" ] && continue
+    [ "$(v2_attempt_count "$(v2_fm_get "$v2_au_f" turn_id)" "$(v2_fm_get "$v2_au_f" attempt_id)" result)" -eq 0 ] \
+      && v2_fail OPEN_NOT_NEWEST "$v2_au_n" "an open assignment is not the newest assignment; one open attempt is the exclusive worktree lease"
+  done <"$V2_SORTED"
+}
+
+# --- the close lifecycle --------------------------------------------------------------------------------------
+v2_check_close_lifecycle() {
+  while read -r v2_cx_seq v2_cx_kind v2_cx_name v2_cx_file; do
+    [ -n "${v2_cx_seq:-}" ] || continue
+    [ "$v2_cx_kind" = close ] || continue
+    v2_cx_cid="$(v2_fm_get "$v2_cx_file" close_id)"
+
+    # A close may not be written over a LIVE attempt. The close arm outranks turn state in replay, so
+    # without this a close committed over a running agent silently terminates its lease and the topic
+    # reports CLOSED while someone is still working in the worktree.
+    for v2_cx_af in $(v2_files_of_kind assignment); do
+      [ "$(v2_fm_get "$v2_cx_af" record_seq)" \< "$v2_cx_seq" ] || continue
+      v2_cx_rseq=""
+      while read -r v2_cx_s2 v2_cx_k2 v2_cx_n2 v2_cx_f2; do
+        [ -n "${v2_cx_s2:-}" ] || continue
+        [ "$v2_cx_k2" = result ] || continue
+        [ "$(v2_fm_get "$v2_cx_f2" turn_id)" = "$(v2_fm_get "$v2_cx_af" turn_id)" ] || continue
+        [ "$(v2_fm_get "$v2_cx_f2" attempt_id)" = "$(v2_fm_get "$v2_cx_af" attempt_id)" ] || continue
+        v2_cx_rseq="$v2_cx_s2"
+      done <"$V2_SORTED"
+      { [ -n "$v2_cx_rseq" ] && [ "$v2_cx_rseq" \< "$v2_cx_seq" ]; } \
+        || v2_fail CLOSE_PRECONDITION "$v2_cx_name" "close '$v2_cx_cid' precedes the terminal result of $(v2_fm_get "$v2_cx_af" record_seq)"
+    done
+
+    # Every question asked before the close must already be answered before it.
+    for v2_cx_qf in $(v2_files_of_kind owner-question); do
+      [ "$(v2_fm_get "$v2_cx_qf" record_seq)" \< "$v2_cx_seq" ] || continue
+      v2_cx_ans="$(v2_answer_of_question "$v2_cx_qf")"
+      { [ -n "$v2_cx_ans" ] && [ "$(v2_fm_get "$v2_cx_ans" record_seq)" \< "$v2_cx_seq" ]; } \
+        || v2_fail CLOSE_PRECONDITION "$v2_cx_name" "close '$v2_cx_cid' precedes the answer to question $(v2_fm_get "$v2_cx_qf" record_seq)"
+    done
+
+    # The close's own claim about the final accepted SHA must equal the RECORD-DERIVED fold. Without
+    # this, a close can name any commit -- including an unexplained tip -- and the branch-at-final
+    # postcondition then compares the branch against that forged claim, laundering drift into CLOSED:
+    # the one state the deployment gate trusts.
+    v2_cx_want="$(v2_accepted_sha_upto "$v2_cx_seq")"
+    [ "$(v2_fm_get "$v2_cx_file" final_accepted_sha)" = "$v2_cx_want" ] \
+      || v2_fail CLOSE_SHA_MISMATCH "$v2_cx_name" "final_accepted_sha is not the record-derived accepted SHA ($v2_cx_want)"
+
+    # Inside a close's window only its own question and answer may appear.
+    v2_cx_end="$(v2_cancelling_answer_seq "$v2_cx_file")"
+    v2_cx_qn=0
+    while read -r v2_cx_s3 v2_cx_k3 v2_cx_n3 v2_cx_f3; do
+      [ -n "${v2_cx_s3:-}" ] || continue
+      [ "$v2_cx_s3" \> "$v2_cx_seq" ] || continue
+      [ -n "$v2_cx_end" ] && { [ "$v2_cx_s3" \> "$v2_cx_end" ] && continue; }
+      case "$v2_cx_k3" in
+        owner-question)
+          if [ "$(v2_fm_get "$v2_cx_f3" blocks)" = "CLOSING:$v2_cx_cid" ]; then
+            v2_cx_qn=$((v2_cx_qn + 1))
+            [ "$v2_cx_qn" -le 1 ] || v2_fail CLOSE_ORDER "$v2_cx_n3" "more than one question blocks close '$v2_cx_cid'"
+          else
+            v2_fail CLOSE_ORDER "$v2_cx_n3" "an unrelated question sits inside the window of close '$v2_cx_cid'"
+          fi ;;
+        owner-answer)
+          v2_cx_q4="$(v2_question_by_id "$(v2_fm_get "$v2_cx_f3" question_ref)")"
+          { [ -n "$v2_cx_q4" ] && [ "$(v2_fm_get "$v2_cx_q4" blocks)" = "CLOSING:$v2_cx_cid" ]; } \
+            || v2_fail CLOSE_ORDER "$v2_cx_n3" "an unrelated answer sits inside the window of close '$v2_cx_cid'" ;;
+        *) v2_fail CLOSE_ORDER "$v2_cx_n3" "a $v2_cx_k3 record sits inside the window of close '$v2_cx_cid'" ;;
+      esac
+    done <"$V2_SORTED"
+  done <"$V2_SORTED"
+}
