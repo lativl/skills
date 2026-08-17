@@ -60,5 +60,12 @@ EXAMPLE_TOPIC="$(/bin/bash "$EXAMPLE/rehydrate.sh" --print-topic)" || exit $?
 /bin/bash "$HERE/../scripts/validate.sh" --check "$EXAMPLE_TOPIC" \
   | grep -Fx 'classification: CLOSED' >/dev/null \
   || { echo "FATAL: the shipped example does not replay to CLOSED" >&2; exit 1; }
+# CLOSED alone would be satisfied by a happy-path example. The point of this one is the failure it
+# carries, so the records that make it worth shipping are asserted by name: a regenerated example
+# that quietly dropped the fenced attempt would otherwise still pass.
+for want in fence-initiated late-01 result-capture; do
+  git -C "$EXAMPLE_TOPIC" ls-tree --name-only -r HEAD turns | grep -q -- "$want" \
+    || { echo "FATAL: the shipped example no longer contains a $want record" >&2; exit 1; }
+done
 /bin/bash "$EXAMPLE/rehydrate.sh" --clean || exit $?
-printf 'example: replayed to CLOSED\n'
+printf 'example: replayed to CLOSED (with a fenced attempt and its late evidence)\n'

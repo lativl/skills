@@ -228,8 +228,8 @@ disposition: PASS
 
 case_id: B09
 manual_version: v2
-observed_action: see the verbatim response above
-evidence_excerpt: see the verbatim response above
+observed_action: Same ladder as B08, but the bound is work_due_epoch stored on the ACK, and the fence is trigger: work-timeout with a non-null ack_ref.
+evidence_excerpt: `work_due_epoch` is `ack_captured_epoch + work_timeout_seconds`
 disposition: PASS
 
 case_id: B10

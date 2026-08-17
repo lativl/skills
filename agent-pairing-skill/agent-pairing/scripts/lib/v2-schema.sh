@@ -1376,17 +1376,28 @@ v2_check_result_matrix() {
     # primary could record a timeout it never fenced, and the durable boundary becomes optional.
     case "$v2_rm_rs" in
       ack-timeout|work-timeout)
-        v2_rm_fseq=""
+        v2_rm_fseq=""; v2_rm_ftrigger=""
         while read -r v2_rm_s5 v2_rm_k5 v2_rm_n5 v2_rm_f5; do
           [ -n "${v2_rm_s5:-}" ] || continue
           [ "$v2_rm_k5" = fence-initiated ] || continue
           [ "$(v2_fm_get "$v2_rm_f5" turn_id)" = "$v2_rm_t" ] || continue
           [ "$(v2_fm_get "$v2_rm_f5" attempt_id)" = "$v2_rm_a" ] || continue
           v2_rm_fseq="$v2_rm_s5"
+          v2_rm_ftrigger="$(v2_fm_get "$v2_rm_f5" trigger)"
           break
         done <"$V2_SORTED"
         if [ -z "$v2_rm_fseq" ]; then
           v2_fail REASON_CONTRADICTED "$v2_rm_name" "$v2_rm_rs requires a committed fence-initiated record for this attempt"
+        elif [ "$v2_rm_ftrigger" != "$v2_rm_rs" ]; then
+          # The reason must name the budget that ACTUALLY expired. A result reading `ack-timeout`
+          # satisfied by a work-timeout fence is a record that lies about which clock ran out --
+          # and the two are not interchangeable, because one means delivery was never acknowledged
+          # and the other means the work did not finish after it was.
+          v2_fail REASON_CONTRADICTED "$v2_rm_name" "reason '$v2_rm_rs' does not match its fence's trigger '$v2_rm_ftrigger'"
+        elif [ "$v2_rm_rs" = ack-timeout ] && [ "$(v2_attempt_count "$v2_rm_t" "$v2_rm_a" ack)" -ge 1 ]; then
+          # An ACK-timeout claims no acknowledgement was ever captured. A committed ACK for this
+          # attempt is that claim's own counterexample.
+          v2_fail REASON_CONTRADICTED "$v2_rm_name" "ack-timeout with a committed ACK on file for this attempt"
         elif [ "$v2_rm_fseq" \> "$v2_rm_seq" ] || [ "$v2_rm_fseq" = "$v2_rm_seq" ]; then
           # Counting is not ordering. A timeout asserted BEFORE its boundary was committed is the
           # state change the fence exists to make durable, happening without it.

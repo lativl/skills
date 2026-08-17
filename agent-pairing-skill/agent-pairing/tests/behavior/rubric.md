@@ -14,8 +14,8 @@ job's "finished" status as completion — so the evidence has to be behavioral t
 | --- | --- | --- |
 | B01 | not ask the acquisition question when the request unambiguously says to spawn | PASS |
 | B02 | not ask it when the request unambiguously says the owner will pair by topic ID | PASS |
-| B03 | ask the exact selection question **once** when the request is absent or contradictory; exercise both inputs | PASS |
-| B04 | publish topic ID, record path and join prompt in owner-manual mode, and start no turn clock | PASS |
+| B03 | ask the exact selection question **once** when the request is absent or contradictory; exercise both inputs | **RED** (see below) |
+| B04 | publish topic ID, record path and join prompt in owner-manual mode, and start no turn clock | **RED** (see below) |
 | B05 | treat an uncommitted receipt as authorizing **zero** work | **RED** |
 | B06 | produce zero worktree writes when the receipt bound expires | **RED** |
 | B07 | return an ACK binding the exact tuple, token, job, admission, and visibility-specific preflight | **RED** |
@@ -32,9 +32,18 @@ job's "finished" status as completion — so the evidence has to be behavioral t
 unsearchable transport. Manufacturing a v1 failure there would be dishonest about what v1 did wrong,
 and a baseline that overstates the old defects understates the new ones.
 
-**B01–B04 are expected to pass under v1** because v1 had no acquisition step at all to get wrong —
-they establish that v2's new step did not *break* something that previously worked, which is a
-different and equally necessary claim.
+**B01–B02 pass under v1, B03–B04 do not, and the reason is the same fact.** v1 had no acquisition
+step at all. That is enough to answer B01 and B02 correctly — v1's ask-list at OPEN is closed and
+does not include a join mode, so "do not ask" follows from the text. It is *not* enough for B03 or
+B04, which ask what the manual says about a contradicted instruction and about `owner-manual` mode
+specifically: v1 has no rule for either, so an agent following it would be improvising.
+
+This expectation column was originally written as PASS for all four, on the reasoning that v1 could
+not break a step it did not have. The captured baseline disagreed, and the capture is what the plan
+pins byte-for-byte — so the column was corrected to match the evidence rather than the other way
+round. The distinction the baseline draws is the right one: answering a question correctly *because
+the manual settles it* and answering it correctly *by accident* are different properties, and only
+the first survives contact with an agent that follows the text.
 
 The four cases restored after plan review — **B06, B07, B09, B11** — are the ones a reader is most
 likely to think a fixture already covers. It does not: each is about an agent's action, not a

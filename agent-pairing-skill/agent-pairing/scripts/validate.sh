@@ -137,6 +137,7 @@ v2_list_records "$V2_TOPIC" \
 # discard the accounting it does.
 V2_TSV="$V2_WORK/records.tsv"
 : >"$V2_TSV" || v2_fatal "cannot create the record index"
+: >"$V2_WORK/attempts" || v2_fatal "cannot create the attempt index"
 
 # The record paths are read from a FILE, one line at a time — never iterated as an unquoted word
 # list. `for p in $LIST` performs pathname expansion as well as word splitting, and setting IFS
@@ -177,6 +178,14 @@ while IFS= read -r v2_path; do
   v2_validate_kind "$v2_staged" "$v2_name"
 
   printf '%s %s %s %s\n' "$(v2_fm_get "$v2_staged" record_seq)" "$v2_kind" "$v2_name" "$v2_staged" >>"$V2_TSV"
+  # A second, narrow index: `turn attempt kind` per attempt-linked record. The values come from the
+  # same staged committed blob the line above was built from, so the trust level is identical -- this
+  # is purely a lookup table. Without it, v2_attempt_count re-parses every record's front matter on
+  # every call (two awk processes per record), and it is called inside several nested loops.
+  if v2_in_list "$v2_kind" "$V2_ATTEMPT_KINDS"; then
+    printf '%s %s %s\n' "$(v2_fm_get "$v2_staged" turn_id)" "$(v2_fm_get "$v2_staged" attempt_id)" "$v2_kind" \
+      >>"$V2_WORK/attempts"
+  fi
 done <"$V2_WORK/records.sorted"
 
 # --- ordering ---------------------------------------------------------------------------------------------

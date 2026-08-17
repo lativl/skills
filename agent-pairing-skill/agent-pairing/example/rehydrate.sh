@@ -18,7 +18,8 @@ case "$ROOT" in /*) ;; *) echo "PATHS.env ROOT must be absolute (got '$ROOT')" >
 FINAL="$(sed -n '1p' "$EX/FINAL_SHA" 2>/dev/null)" || FINAL=""
 TOPIC_BRANCH="$(sed -n '1p' "$EX/TOPIC_BRANCH" 2>/dev/null)" || TOPIC_BRANCH=""
 case "$FINAL" in
-  [0-9a-f][0-9a-f]*) [ ${#FINAL} -eq 40 ] || { echo "FINAL_SHA is not a 40-char sha" >&2; exit 3; } ;;
+  *[!0-9a-f]*) echo "FINAL_SHA is not lowercase hex" >&2; exit 3 ;;
+  ?*) [ ${#FINAL} -eq 40 ] || { echo "FINAL_SHA is not a 40-char sha" >&2; exit 3; } ;;
   *) echo "FINAL_SHA missing or unreadable" >&2; exit 3 ;;
 esac
 [ -n "$TOPIC_BRANCH" ] || { echo "TOPIC_BRANCH missing or empty" >&2; exit 3; }
@@ -87,7 +88,7 @@ git -C "$TS" symbolic-ref HEAD refs/heads/__rehydrate_placeholder \
   && git -C "$TS" checkout -q -f "$TOPIC_BRANCH" \
   || stage_fail "topic repo did not rehydrate"
 # Verify IN STAGING, so a bad restore never replaces a good one.
-[ "$(git -C "$RS" rev-parse refs/heads/$WORK_BRANCH 2>/dev/null)" = "$FINAL" ] \
+[ "$(git -C "$RS" rev-parse "refs/heads/$WORK_BRANCH" 2>/dev/null)" = "$FINAL" ] \
   || stage_fail "rehydration did not restore the tip"
 { [ -f "$TS/TOPIC.md" ] && [ -d "$TS/turns" ]; } \
   || stage_fail "rehydrated topic repo has no records"

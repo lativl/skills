@@ -10,16 +10,14 @@
 # two machines, and a timeout would take effect with nothing in the history saying so.
 
 # Count records of one kind belonging to one attempt.
+#
+# Reads the narrow attempt index built during the record loop rather than re-parsing front matter.
+# The previous form spawned two awk processes PER RECORD on every call, and this is called inside
+# several nested loops -- the package gate spent most of its time here. The values in that index came
+# from the same staged committed blobs, so nothing is trusted that was not trusted before.
 v2_attempt_count() { # <turn_id> <attempt_id> <kind>
-  v2_ac_t="$1" v2_ac_a="$2" v2_ac_k="$3" v2_ac_n=0
-  while read -r v2_ac_seq v2_ac_kind v2_ac_name v2_ac_file; do
-    [ -n "${v2_ac_seq:-}" ] || continue
-    [ "$v2_ac_kind" = "$v2_ac_k" ] || continue
-    [ "$(v2_fm_get "$v2_ac_file" turn_id)" = "$v2_ac_t" ] || continue
-    [ "$(v2_fm_get "$v2_ac_file" attempt_id)" = "$v2_ac_a" ] || continue
-    v2_ac_n=$((v2_ac_n + 1))
-  done <"$V2_SORTED"
-  printf '%s\n' "$v2_ac_n"
+  awk -v t="$1" -v a="$2" -v k="$3" '$1 == t && $2 == a && $3 == k { n++ } END { print n + 0 }' \
+    "$V2_WORK/attempts"
 }
 
 # The newest assignment with no terminal result for its attempt. One open attempt is the exclusive

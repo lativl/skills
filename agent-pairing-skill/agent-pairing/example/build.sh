@@ -26,9 +26,21 @@ export GIT_COMMITTER_DATE="$GIT_AUTHOR_DATE"
 export TZ=UTC
 export GIT_NO_REPLACE_OBJECTS=1
 
-ROOT="$(mktemp -d /tmp/ap-v2-example.XXXXXX)" || { echo "FATAL: temp allocation failed" >&2; exit 3; }
-[ -n "$ROOT" ] && [ -d "$ROOT" ] || { echo "FATAL: temp allocation produced no directory" >&2; exit 3; }
-case "$ROOT" in /tmp/ap-v2-example.?*) ;; *) echo "FATAL: $ROOT is not under the expected prefix" >&2; exit 3 ;; esac
+# The root is PINNED, not allocated. `session_worktree` and `work_repo_common_dir` are absolute paths
+# embedded in TOPIC.md and in every assignment, so a per-run mktemp root goes into the committed
+# bytes: the work-repo bundle stayed byte-identical across builds while the TOPIC bundle changed
+# every time, and each regeneration dirtied git with no semantic change at all. A fixed path makes
+# "two builds produce byte-identical commits" true of both bundles rather than only one.
+#
+# Create-or-refuse: if the path already exists, that is a leftover from an interrupted build, and
+# reusing it would mix two builds' objects. Remove it deliberately rather than have the script guess.
+ROOT=/tmp/ap-v2-example
+if [ -e "$ROOT" ]; then
+  echo "FATAL: $ROOT already exists. Remove it and re-run:" >&2
+  echo "         rm -rf $ROOT" >&2
+  exit 3
+fi
+mkdir -p "$ROOT" || { echo "FATAL: cannot create $ROOT" >&2; exit 3; }
 R="$ROOT/repo"; W="$ROOT/wt"; T="$ROOT/topic"
 TOPIC_ID=example-v2
 BRANCH="pair/$TOPIC_ID"
@@ -427,7 +439,7 @@ ENV
 # starts from nothing: rehydrate.sh refuses to delete a directory without its ownership marker, and
 # leaving unmarked leftovers here would wedge every later run behind that guard.
 case "$ROOT" in
-  /tmp/ap-v2-example.?*) rm -rf "$R" "$T" "$W" ;;
+  /tmp/ap-v2-example) rm -rf "$R" "$T" "$W" "$ROOT/msg1" ;;
   *) die "refusing to clean $ROOT" ;;
 esac
 

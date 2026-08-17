@@ -16,6 +16,12 @@ BASELINE="$HERE/baseline-v1.md"
 ACCEPTED="$HERE/accepted-v2.md"
 CASES="$HERE/cases"
 
+BH_TMP="$(mktemp -d /tmp/agent-pairing-behavior.XXXXXX)" \
+  || { echo "FATAL: temp allocation failed" >&2; exit 3; }
+[ -n "$BH_TMP" ] && [ -d "$BH_TMP" ] || { echo "FATAL: temp allocation produced no directory" >&2; exit 3; }
+trap 'case "$BH_TMP" in /tmp/agent-pairing-behavior.?*) rm -rf "$BH_TMP";; esac' EXIT
+MC_RESP="$BH_TMP/response"
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
 nok() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n      %s\n' "$1" "$2"; }
@@ -50,13 +56,19 @@ disposition() { # <artifact> <case>
     inblock && $1 == "disposition:" { print $2; exit }
   ' "$1"
 }
-has_excerpt() { # <artifact> <case>
+# The excerpt VALUE, not merely the key. A present-but-empty key is the shape of a disposition with
+# no evidence, which the rubric forbids and a presence check cannot see.
+excerpt_of() { # <artifact> <case>
   awk -v c="$2" '
     $1 == "case_id:" && $2 == c { inblock = 1; next }
     inblock && $1 == "case_id:" { exit }
-    inblock && $1 == "evidence_excerpt:" { found = 1 }
-    END { exit !found }
+    inblock && $1 == "evidence_excerpt:" { sub(/^[[:space:]]*evidence_excerpt:[[:space:]]*/, ""); print; exit }
   ' "$1"
+}
+
+# The fenced verbatim capture, which every excerpt must actually come from.
+response_of() { # <artifact>
+  awk '/^````/ { c = !c; next } c' "$1"
 }
 
 check_artifact() { # <artifact> <label>
@@ -96,16 +108,37 @@ check_artifact() { # <artifact> <label>
   fi
 
   # A disposition with no verbatim excerpt is an opinion. The point of a captured baseline is that
-  # the claim can be re-checked later against what was actually said.
-  noev=""
+  # the claim can be re-checked later against what was actually said -- so the excerpt must be
+  # non-empty AND must appear in the captured response. Checking only that the KEY exists let an
+  # artifact of fifteen PASS lines with empty excerpts pass the whole gate, and let a placeholder
+  # like "see the verbatim response above" stand in for evidence.
+  RESP="$MC_RESP"
+  response_of "$a" >"$RESP" || :
+  noev=""; badev=""
   for c in $ALL_CASES; do
     [ -n "$(disposition "$a" "$c")" ] || continue
-    has_excerpt "$a" "$c" || noev="$noev $c"
+    ex="$(excerpt_of "$a" "$c")"
+    if [ -z "$ex" ]; then
+      noev="$noev $c"
+    elif ! grep -Fq "$(printf '%s' "$ex" | cut -c1-60)" "$RESP"; then
+      badev="$badev $c"
+    fi
   done
   if [ -n "$noev" ]; then
-    nok "$label: every disposition cites verbatim evidence" "no evidence_excerpt for:$noev"
+    nok "$label: every disposition cites verbatim evidence" "empty or missing evidence_excerpt for:$noev"
+  elif [ -n "$badev" ]; then
+    nok "$label: every excerpt appears in the captured response" \
+      "excerpt not found in the fenced capture for:$badev"
   else
     ok "$label: every disposition cites verbatim evidence"
+    ok "$label: every excerpt appears in the captured response"
+  fi
+
+  # The fenced capture must contain something. An empty fence is a "verbatim response" nobody gave.
+  if [ -s "$RESP" ]; then
+    ok "$label: the captured response is non-empty"
+  else
+    nok "$label: the captured response is non-empty" "the fenced block holds no text"
   fi
 
   # The captured model response is preserved as fenced text, separately from the deterministic
