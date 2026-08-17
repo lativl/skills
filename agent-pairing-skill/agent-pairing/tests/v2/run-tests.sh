@@ -116,6 +116,36 @@ if v2_group common; then
       "expected EPOCH_ORDER against 0004-t0001-a01-dispatch.md; got: $(grep -m1 VIOLATION "$V2_OUT")"
   fi
 
+  # record_seq is the ordering authority, so a gap and a duplicate are both defects. These two cases
+  # exist because the rules died silently once: a later fix reused one temp filename for two
+  # different files, the prefix scan started reading index lines instead of record paths, and both
+  # checks became unreachable while the suite stayed green. A rule with no case keeps passing after
+  # it is deleted.
+  v2_expect_only_violation "record_seq is contiguous from 0001" \
+    common-defects/seq-gap SEQ_GAP
+  v2_expect_only_violation "record_seq is not reused" \
+    common-defects/seq-dup SEQ_DUP
+
+  # Regression: a Finder .DS_Store under artifacts/ — ignored by the global core.excludesFile on
+  # essentially every macOS machine — is not protocol residue. Artifact integrity is pinned by the
+  # capture record's byte count and SHA-256, which is stronger evidence than a status line.
+  v2_case_ds_store_is_not_residue() {
+    v2_n="an ignored file outside the record tree is not residue"
+    v2_t="$(v2_materialize "$V2_FIXTURES/common-valid")" || { v2_nok "$v2_n" "materialize failed"; return; }
+    mkdir -p "$v2_t/artifacts/t0001-a01" || { v2_nok "$v2_n" "cannot create artifacts dir"; return; }
+    printf 'finder junk\n' >"$v2_t/artifacts/t0001-a01/.DS_Store"
+    printf '.DS_Store\n' >"$v2_t/.excludes"
+    git -C "$v2_t" config core.excludesFile "$v2_t/.excludes" || { v2_nok "$v2_n" "cannot set excludesFile"; return; }
+    "$V2_VALIDATE" --check "$v2_t" >"$V2_OUT" 2>&1
+    v2_rc=$?
+    if [ "$v2_rc" -eq 0 ]; then
+      v2_ok "$v2_n"
+    else
+      v2_nok "$v2_n" "expected exit 0; got $v2_rc: $(sed -n '1p' "$V2_OUT")"
+    fi
+  }
+  v2_case_ds_store_is_not_residue
+
   # Regression: a committed record path that looks like a glob must be INSPECTED, not expanded.
   # `for p in $LIST` performs pathname expansion even with IFS set, so a record named
   # `turns/000[6]-close.md` was replaced by whichever real file matched in the CURRENT directory.

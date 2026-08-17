@@ -187,7 +187,7 @@ admission evidence and the record would then describe a pairing that did not hap
    ```
 
 9. Commit the record repo. **The topic exists only when this commit exists.**
-10. Gate: run `git -C <topic-dir> status --porcelain` — it **must be empty** — then
+10. Gate: run `git -C <topic-dir> status --porcelain -- turns TOPIC.md` — it **must be empty** — then
     `scripts/validate.sh --check <topic-dir>`, and STOP on exit 2. A freshly opened topic
     classifies `AWAITING_PARTICIPANT`: it has a charter and a pinned base, but no admitted
     participant yet.

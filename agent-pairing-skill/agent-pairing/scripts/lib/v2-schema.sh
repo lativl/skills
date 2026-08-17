@@ -218,6 +218,14 @@ v2_schema_admission() { # <staged-file> <display-name>
     v2_fail CAPABILITY_VISIBILITY "$v2_ad_n" "capability: commits requires worktree_visible: true"
   fi
 
+  # The identity scalars must be non-empty, not merely present. `admission_id` is the cross-reference
+  # every assignment binds; an empty one is not a name, and two empty ones collide as a duplicate of
+  # the empty string rather than being reported as the missing identity they are.
+  for v2_ad_k in admission_id agent_id transport; do
+    [ -n "$(v2_fm_get "$v2_ad_f" "$v2_ad_k")" ] \
+      || v2_fail ADMISSION_IDENTITY "$v2_ad_n" "$v2_ad_k is empty"
+  done
+
   v2_ad_akind="$(v2_fm_get "$v2_ad_f" durable_address_kind)"
   # A monitor, waiter, or foreground polling handle names a WATCHER, not the job. After a crash the
   # watcher is gone and the handle finds nothing, which is precisely when a durable address is needed.
@@ -249,10 +257,16 @@ v2_schema_admission() { # <staged-file> <display-name>
   v2_in_list "$v2_ad_cls" "$V2_ACK_EVIDENCE_CLASSES" \
     || v2_fail ACK_EVIDENCE_CLASS "$v2_ad_n" "ack_evidence_class=$v2_ad_cls is not one of: $V2_ACK_EVIDENCE_CLASSES"
 
+  # Routed through v2_uint_value, not just v2_is_uint: a value like 10^26 is all decimal digits, so
+  # `v2_is_uint` accepts it and the very next `[ "$v" -eq 0 ]` fails with `integer expression
+  # expected` on stderr — a false test result, no violation, and exit 0. Every arithmetic input in
+  # this protocol has to be inside the range the shell and awk agree on before it is compared.
   for v2_ad_k in receipt_commit_timeout_seconds default_ack_timeout_seconds; do
     v2_ad_v="$(v2_fm_get "$v2_ad_f" "$v2_ad_k")"
-    if ! v2_is_uint "$v2_ad_v" || [ "$v2_ad_v" -eq 0 ]; then
-      v2_fail ADMISSION_TIMEOUT "$v2_ad_n" "$v2_ad_k='$v2_ad_v' is not a positive decimal integer"
+    if ! v2_uint_value "$v2_ad_v" >/dev/null 2>&1; then
+      v2_fail ADMISSION_TIMEOUT "$v2_ad_n" "$v2_ad_k='$v2_ad_v' is not a decimal integer within the exact range (1..$V2_EPOCH_MAX)"
+    elif [ "$v2_ad_v" -eq 0 ]; then
+      v2_fail ADMISSION_TIMEOUT "$v2_ad_n" "$v2_ad_k='$v2_ad_v' is not a POSITIVE integer"
     fi
   done
 }

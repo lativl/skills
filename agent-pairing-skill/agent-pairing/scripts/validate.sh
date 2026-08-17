@@ -181,7 +181,12 @@ done <"$V2_WORK/records.sorted"
 # `record_seq` is the ordering authority. It is strictly increasing AND contiguous from 0001: a gap
 # is indistinguishable from a record that was written and then lost, and an append-only log that
 # cannot tell those apart cannot claim to be replayable.
-V2_SORTED="$V2_WORK/records.sorted"
+# NOT `records.sorted` — that name belongs to v2_list_records' raw committed-path list, and reusing
+# it clobbered the path list with index lines. The prefix-deriving awk below then read
+# `0002 admission 0002-admission.md /tmp/...` instead of `turns/0002-admission.md`, produced a
+# "prefix" no four-digit case could match, and skipped every line: SEQ_GAP and SEQ_DUP became dead
+# code that could not fire for any input. Two distinct artifacts get two distinct names.
+V2_SORTED="$V2_WORK/records.index"
 LC_ALL=C sort "$V2_TSV" >"$V2_SORTED" || v2_fatal "cannot order the record index"
 
 # Contiguity is derived from the COMMITTED FILENAMES, not from the records that survived front-matter

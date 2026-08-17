@@ -240,8 +240,16 @@ v2_check_uncommitted_residue() { # <topic>
   # core.excludesFile the topic never sees — makes a half-written receipt invisible and the topic
   # classifies as though nothing were there. An ignore rule must not be able to decide whether the
   # protocol's residue evidence exists.
+  #
+  # The pathspec is the RECORD TREE only: `turns/` and `TOPIC.md`. `artifacts/` is deliberately
+  # excluded, and not as a concession — an artifact's integrity is pinned by its capture record's
+  # byte count and SHA-256, which is strictly stronger evidence than a status line, and an
+  # uncommitted artifact fails when the validator tries to read `HEAD:` for it. Including
+  # `artifacts/` under `--ignored=matching` meanwhile made a Finder `.DS_Store` — ignored by a
+  # global excludesFile on essentially every macOS machine — report as protocol residue and fail an
+  # otherwise valid topic.
   v2_res_status="$(v2_git "$1" status --porcelain --untracked-files=all --ignored=matching \
-                     -- turns TOPIC.md artifacts 2>/dev/null)"
+                     -- turns TOPIC.md 2>/dev/null)"
   v2_res_rc=$?
   if [ "$v2_res_rc" -ne 0 ]; then
     v2_fail GIT_READ "$1" "cannot read record working-tree status"
