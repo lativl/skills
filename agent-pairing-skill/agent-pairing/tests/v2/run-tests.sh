@@ -26,7 +26,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version common admission clocks ack templates"
+V2_GROUPS="version common admission clocks ack capture templates"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -341,6 +341,46 @@ if v2_group ack; then
     ack/wrong-work-due WORK_DUE
 fi
 
+# --- capture: exact participant bytes ---------------------------------------------------------------
+# The motivating v1 failure was a STALE capture: the captured report and the final report had
+# different byte counts and different SHA-256 values, and nothing in the record noticed. v2 makes the
+# participant finalize an author manifest, writes the bytes once without normalization, recomputes
+# the manifest, and commits both.
+if v2_group capture; then
+  # Byte shapes that a line-oriented reconstruction would quietly alter.
+  v2_expect_ok "ASCII with a trailing newline" capture/ascii-trailing-newline
+  v2_expect_ok "ASCII WITHOUT a trailing newline" capture/ascii-no-trailing-newline
+  v2_expect_ok "UTF-8 multi-byte content" capture/utf8-report
+  # The artifact is an opaque byte boundary: a report body containing `---` and fences is content,
+  # never control data, so it cannot inject front matter into the record stream.
+  v2_expect_ok "a report body containing --- and fences" capture/framing-in-body
+
+  v2_expect_only_violation "an author byte count that disagrees with the bytes" \
+    capture/author-bytes-mismatch CAPTURE_BYTES
+  v2_expect_only_violation "an author digest that disagrees with the bytes" \
+    capture/author-sha-mismatch CAPTURE_SHA256
+  v2_expect_only_violation "a declared trailing-newline state that disagrees with the bytes" \
+    capture/newline-mismatch CAPTURE_NEWLINE
+  v2_expect_only_violation "the artifact lives under this attempt's own directory" \
+    capture/path-outside-attempt CAPTURE_PATH
+
+  v2_expect_only_violation "read-only produces no relay patch" \
+    capture/readonly-with-patch CAPABILITY_PATCH
+  v2_expect_ok "writes-repo-only may relay a patch with its own manifest" \
+    capture/writes-with-patch
+
+  # A terminal status is accountable to evidence, not to the primary's memory of the turn.
+  v2_expect_ok "a VERIFIED result citing its ACK and its capture" capture/result-verified
+  v2_expect_only_violation "VERIFIED requires a valid ACK" \
+    capture/result-verified-no-ack RESULT_ACK_REF
+  v2_expect_only_violation "VERIFIED requires a matching capture" \
+    capture/result-verified-no-capture RESULT_CAPTURE_REF
+  # `ack_ref: null` is legal only where no acknowledgement could exist. A plain verification failure
+  # is not one of those cases: the work WAS delivered, so the delivery evidence must still be cited.
+  v2_expect_only_violation "a null ack_ref needs a reason that explains the absence" \
+    capture/result-null-ack-bad-reason RESULT_ACK_REF
+fi
+
 # --- templates: the canonical bodies instantiate into a VALID topic ------------------------------------
 # Moved here from the v1 harness in Task 4. A template is a contract with whoever fills it in: if the
 # canonical body cannot be instantiated into a topic the validator accepts, every agent following the
@@ -404,6 +444,45 @@ if v2_group templates; then
            -e 's/{{DISPATCHED_EPOCH}}/1030/' -e 's/{{ACK_DUE_EPOCH}}/1630/' \
            -e 's/{{RECEIPT_SOURCE}}/direct/' \
            "$v2_tpl/dispatch.md" >"$v2_t/turns/0004-t0001-a01-dispatch.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0005/' -e 's/{{RECORDED_EPOCH}}/1040/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{INTENT_REF}}/0003-t0001-a01-intent.md/' \
+           -e 's/{{DISPATCH_REF}}/0004-t0001-a01-dispatch.md/' \
+           -e 's/{{ADMISSION_REF}}/0001-admission.md/' \
+           -e 's/{{JOB_ID}}/job-0001/' -e 's/{{IDEMPOTENCY_TOKEN}}/tok-0001/' \
+           -e 's/{{OBSERVED_HEAD}}/1111111111111111111111111111111111111111/' \
+           -e 's/{{PREFLIGHT_CLEAN}}/true/' -e 's/{{RELAYED_BASE_SHA}}/null/' \
+           -e 's/{{ACK_EVIDENCE_CLASS}}/human-relayed/' \
+           -e 's/{{ACK_CAPTURED_EPOCH}}/1040/' -e 's/{{WORK_DUE_EPOCH}}/4640/' \
+           "$v2_tpl/ack.md" >"$v2_t/turns/0005-t0001-a01-ack.md"
+
+    # The capture's manifests are COMPUTED from the artifact this case writes, not typed, so the
+    # instantiated template cannot claim a manifest its own bytes do not have.
+    mkdir -p "$v2_t/artifacts/t0001-a01"
+    printf 'Templated report.\n' >"$v2_t/artifacts/t0001-a01/report.md"
+    v2_art="$v2_t/artifacts/t0001-a01/report.md"
+    v2_bc="$(LC_ALL=C wc -c <"$v2_art" | tr -d ' ')"
+    v2_sh="$(shasum -a 256 "$v2_art" | awk '{print $1}')"
+    v2_sub -e 's/{{RECORD_SEQ}}/0006/' -e 's/{{RECORDED_EPOCH}}/1050/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{DISPATCH_REF}}/0004-t0001-a01-dispatch.md/' \
+           -e 's/{{ACK_REF}}/0005-t0001-a01-ack.md/' \
+           -e 's|{{ARTIFACT_REF}}|artifacts/t0001-a01/report.md|' \
+           -e "s/{{AUTHOR_BYTE_COUNT}}/$v2_bc/" -e "s/{{AUTHOR_SHA256}}/$v2_sh/" \
+           -e "s/{{OBSERVED_BYTE_COUNT}}/$v2_bc/" -e "s/{{OBSERVED_SHA256}}/$v2_sh/" \
+           -e 's/{{TRAILING_NEWLINE}}/present/' -e 's/{{CAPTURED_EPOCH}}/1050/' \
+           "$v2_tpl/result-capture.md" >"$v2_t/turns/0006-t0001-a01-result-capture.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0007/' -e 's/{{RECORDED_EPOCH}}/1060/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{DISPATCH_REF}}/0004-t0001-a01-dispatch.md/' \
+           -e 's/{{ACK_REF}}/0005-t0001-a01-ack.md/' \
+           -e 's/{{RESULT_CAPTURE_REF}}/0006-t0001-a01-result-capture.md/' \
+           -e 's/{{STATUS}}/VERIFIED/' -e 's/{{REASON}}//' \
+           -e 's/{{RESULT_SHA}}/2222222222222222222222222222222222222222/' \
+           -e 's/{{OBSERVED_AT}}/2026-08-14T10:01:00Z/' \
+           "$v2_tpl/result.md" >"$v2_t/turns/0007-t0001-a01-result.md"
 
     if grep -rl '{{[A-Z][A-Z0-9_]*}}' "$v2_t" >/dev/null 2>&1; then
       v2_nok "$v2_n_token" "surviving token in $(grep -rl '{{[A-Z][A-Z0-9_]*}}' "$v2_t" | tr '\n' ' ')"

@@ -18,6 +18,8 @@ relayed_base_sha: {{RELAYED_BASE_SHA}}
 ack_evidence_class: {{ACK_EVIDENCE_CLASS}}
 ack_captured_epoch: {{ACK_CAPTURED_EPOCH}}
 work_due_epoch: {{WORK_DUE_EPOCH}}
+recorded_epoch: {{RECORDED_EPOCH}}
+recorded_at: {{RECORDED_AT}}
 ---
 The participant's acknowledgement, captured by the primary after the participant observed the
 COMMITTED dispatch receipt.

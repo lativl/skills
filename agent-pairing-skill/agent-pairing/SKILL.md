@@ -283,11 +283,53 @@ the bytes do not validate, hash them into one owner question before removing the
 You write yourself an assignment for your own turns too — reverts, remediation, applying a relayed
 patch. No commit exists without an assigned turn.
 
+### CYCLE — result capture
+
+The motivating v1 failure was a **stale capture**: the captured report and the final report had
+different byte counts and different SHA-256 values, and no rule noticed. Report bytes are now
+captured as an immutable artifact with two independent manifests over them.
+
+Run this exact sequence:
+
+```text
+1. Receive the finalized manifest and bytes over the ADMITTED report channel.
+2. Write the bytes ONCE to artifacts/tTTTT-aAA/report.md — no line-oriented reconstruction.
+3. Recompute byte count, SHA-256, encoding expectation, and trailing-newline state.
+4. Commit the artifact plus the result-capture record BEFORE interpreting the report.
+5. On mismatch, preserve BOTH manifests; never repair or normalize.
+6. Re-run the assigned verification, and only then commit the terminal result.
+```
+
+Step 2 is where a capture goes stale. Read the bytes and write them; do not iterate lines, do not
+re-wrap, do not append a newline that was not there. `trailing_newline` is part of the manifest
+precisely because it is the byte-level fact that line-oriented handling silently changes.
+
+Step 4 is ordered deliberately. Committing the bytes before you interpret them means that whatever
+you conclude next, the evidence you concluded it from is already durable.
+
+On a manifest mismatch:
+
+| Worktree state | Terminal status |
+| --- | --- |
+| clean and stationary | `ABORTED: transport-lossy`, both manifests recorded |
+| a landed commit or residue | `REJECTED`, branch quarantined, both manifests preserved as evidence |
+
+**Never repair, normalize, truncate, or reinterpret participant bytes.** A repaired report is your
+report, and the manifest that would have caught the loss now certifies your edit instead.
+
+The artifact is an **opaque byte boundary**. A report may contain `---`, front matter, or record
+framing; none of it is ever parsed as control data, and `THREAD.md` renders it as quoted content
+only. That is what keeps a report from injecting a record.
+
+For relayed code, the existing discipline is unchanged: preserve the base SHA, byte count, SHA-256,
+apply with `git apply --3way`, and commit with `On-behalf-of` plus `Applied-by: primary`. A relay
+patch is admissible only under `capability: writes-repo-only`.
+
 ### Result half
 
-7. **Capture the returned output verbatim** into `templates/result.md`'s first section. Fence it
-   with one more backtick than the longest run in the captured text, minimum four. Keep your own
-   commentary in the separate section — never blended into the agent's words.
+7. **Reference the captured artifact** from `templates/result.md`; cite `result_capture_ref` and
+   `ack_ref`. Keep your own commentary in the separate section — never blended into the agent's
+   words. A `VERIFIED` result requires both a valid ACK and a matching capture.
 8. **Run the checks below**, then set exactly one terminal status and one reason:
 
    | Status | When | Advances the accepted SHA? |

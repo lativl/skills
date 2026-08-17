@@ -233,6 +233,8 @@ v2_check_admissions "$V2_SORTED"
 v2_check_attempt_links
 v2_check_clocks
 v2_check_acks
+v2_check_captures "$V2_TOPIC"
+v2_check_results
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
 

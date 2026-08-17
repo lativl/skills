@@ -665,8 +665,159 @@ v2_check_acks() {
       || v2_fail WORK_DUE "$v2_ka_name" "work_due_epoch $v2_ka_wd != ack_captured_epoch $v2_ka_ce + assignment work_timeout_seconds $v2_ka_wt"
   done <"$V2_SORTED"
 }
-v2_schema_result_capture() { :; }   # Task 6
-v2_schema_result()         { :; }   # Task 6
+# --- result-capture: exact bytes, two manifests ------------------------------------------------------------
+v2_schema_result_capture() { # <staged-file> <display-name>
+  v2_rk_f="$1" v2_rk_n="$2"
+  for v2_rk_k in assignment_ref dispatch_ref ack_ref artifact_ref author_byte_count author_sha256 \
+                 observed_byte_count observed_sha256 encoding trailing_newline captured_epoch; do
+    v2_fm_has "$v2_rk_f" "$v2_rk_k" || { v2_fail MISSING_KEY "$v2_rk_n" "missing $v2_rk_k"; return 1; }
+  done
+  [ "$(v2_fm_get "$v2_rk_f" encoding)" = utf-8 ] \
+    || v2_fail CAPTURE_ENCODING "$v2_rk_n" "encoding must be utf-8"
+  case "$(v2_fm_get "$v2_rk_f" trailing_newline)" in
+    present|absent) ;;
+    *) v2_fail CAPTURE_NEWLINE "$v2_rk_n" "trailing_newline must be present or absent" ;;
+  esac
+  for v2_rk_k in author_sha256 observed_sha256; do
+    v2_is_sha256 "$(v2_fm_get "$v2_rk_f" "$v2_rk_k")" \
+      || v2_fail CAPTURE_SHA256 "$v2_rk_n" "$v2_rk_k is not a lowercase 64-character hex digest"
+  done
+  for v2_rk_k in author_byte_count observed_byte_count; do
+    v2_uint_value "$(v2_fm_get "$v2_rk_f" "$v2_rk_k")" >/dev/null 2>&1 \
+      || v2_fail CAPTURE_BYTES "$v2_rk_n" "$v2_rk_k is not a non-negative decimal integer within the exact range"
+  done
+  v2_uint_value "$(v2_fm_get "$v2_rk_f" captured_epoch)" >/dev/null 2>&1 \
+    || v2_fail EPOCH_RANGE "$v2_rk_n" "captured_epoch is not a decimal integer within the exact range"
+}
+
+# The cross-record half: the manifests are compared against the ACTUAL COMMITTED BYTES, which is the
+# only comparison that catches a stale capture. Comparing author against observed alone would pass
+# any capture whose two manifests were computed from the same wrong bytes.
+v2_check_captures() { # <topic>
+  v2_cp_topic="$1"
+  while read -r v2_cp_seq v2_cp_kind v2_cp_name v2_cp_file; do
+    [ -n "${v2_cp_seq:-}" ] || continue
+    [ "$v2_cp_kind" = result-capture ] || continue
+
+    v2_cp_t="$(v2_fm_get "$v2_cp_file" turn_id)"
+    v2_cp_a="$(v2_fm_get "$v2_cp_file" attempt_id)"
+    v2_cp_art="$(v2_fm_get "$v2_cp_file" artifact_ref)"
+
+    # The artifact lives under THIS attempt's own directory. A capture pointing anywhere else could
+    # name another attempt's report — or a path outside the artifact tree entirely — and inherit its
+    # digests, so the manifest would verify against bytes that belong to a different turn.
+    case "$v2_cp_art" in
+      "artifacts/t$v2_cp_t-a$v2_cp_a/report.md") ;;
+      *) v2_fail CAPTURE_PATH "$v2_cp_name" "artifact_ref '$v2_cp_art' is not artifacts/t$v2_cp_t-a$v2_cp_a/report.md"
+         continue ;;
+    esac
+
+    v2_cp_blob="$(v2_stage_committed "$v2_cp_topic" "$v2_cp_art")" || v2_cp_blob=""
+    if [ -z "$v2_cp_blob" ]; then
+      v2_fail CAPTURE_PATH "$v2_cp_name" "artifact '$v2_cp_art' is not in the committed tree; the bytes must be committed with the capture record"
+      continue
+    fi
+
+    # Recompute from the committed bytes and compare BOTH manifests against them.
+    v2_cp_obc="$(v2_byte_count "$v2_cp_blob")"
+    v2_cp_osh="$(v2_sha256 "$v2_cp_blob")"
+    v2_cp_otn="$(v2_has_trailing_newline "$v2_cp_blob")"
+
+    [ "$(v2_fm_get "$v2_cp_file" author_byte_count)" = "$v2_cp_obc" ] \
+      || v2_fail CAPTURE_BYTES "$v2_cp_name" "author_byte_count $(v2_fm_get "$v2_cp_file" author_byte_count) != the committed artifact's $v2_cp_obc bytes"
+    [ "$(v2_fm_get "$v2_cp_file" observed_byte_count)" = "$v2_cp_obc" ] \
+      || v2_fail CAPTURE_BYTES "$v2_cp_name" "observed_byte_count $(v2_fm_get "$v2_cp_file" observed_byte_count) != the committed artifact's $v2_cp_obc bytes"
+    [ "$(v2_fm_get "$v2_cp_file" author_sha256)" = "$v2_cp_osh" ] \
+      || v2_fail CAPTURE_SHA256 "$v2_cp_name" "author_sha256 does not match the committed artifact's digest $v2_cp_osh"
+    [ "$(v2_fm_get "$v2_cp_file" observed_sha256)" = "$v2_cp_osh" ] \
+      || v2_fail CAPTURE_SHA256 "$v2_cp_name" "observed_sha256 does not match the committed artifact's digest $v2_cp_osh"
+    [ "$(v2_fm_get "$v2_cp_file" trailing_newline)" = "$v2_cp_otn" ] \
+      || v2_fail CAPTURE_NEWLINE "$v2_cp_name" "declares trailing_newline: $(v2_fm_get "$v2_cp_file" trailing_newline) but the committed artifact is $v2_cp_otn"
+
+    # --- capability and the relay patch ------------------------------------------------------------------
+    v2_cp_ap="$(v2_resolve_ref "$(v2_fm_get "$v2_cp_file" assignment_ref)" assignment)" || continue
+    v2_cp_adp="$(v2_resolve_ref "$(v2_fm_get "$v2_cp_ap" admission_ref)" admission)" || continue
+    v2_cp_cap="$(v2_fm_get "$v2_cp_adp" capability)"
+
+    # `read-only` is report-only BY CONTRACT. This is a protocol permission rule, not a claim that
+    # emitting patch bytes requires filesystem writes: a read-only participant is perfectly capable
+    # of printing a diff, and the rule is that its output may not be admitted as one.
+    v2_cp_patch="artifacts/t$v2_cp_t-a$v2_cp_a/patch.diff"
+    if v2_git "$v2_cp_topic" rev-parse --verify --quiet "HEAD:$v2_cp_patch" >/dev/null 2>&1; then
+      case "$v2_cp_cap" in
+        writes-repo-only) ;;
+        *) v2_fail CAPABILITY_PATCH "$v2_cp_name" "capability: $v2_cp_cap admits no relay patch, but $v2_cp_patch is committed" ;;
+      esac
+      if v2_fm_has "$v2_cp_file" patch_sha256; then
+        v2_cp_pblob="$(v2_stage_committed "$v2_cp_topic" "$v2_cp_patch")" || v2_cp_pblob=""
+        if [ -n "$v2_cp_pblob" ]; then
+          [ "$(v2_fm_get "$v2_cp_file" patch_byte_count)" = "$(v2_byte_count "$v2_cp_pblob")" ] \
+            || v2_fail CAPTURE_BYTES "$v2_cp_name" "patch_byte_count != the committed patch's byte count"
+          [ "$(v2_fm_get "$v2_cp_file" patch_sha256)" = "$(v2_sha256 "$v2_cp_pblob")" ] \
+            || v2_fail CAPTURE_SHA256 "$v2_cp_name" "patch_sha256 does not match the committed patch"
+        fi
+      fi
+    elif v2_fm_has "$v2_cp_file" patch_ref; then
+      v2_fail CAPTURE_PATH "$v2_cp_name" "declares patch_ref but $v2_cp_patch is not in the committed tree"
+    fi
+  done <"$V2_SORTED"
+}
+
+# --- result: a terminal status accountable to evidence -------------------------------------------------------
+# Task 6 owns the LINKAGE — which evidence a terminal status must cite. The status/reason matrix and
+# the result_sha rules are Task 8's port of the preserved v1 checks.
+V2_ACK_NULL_REASONS="ack-preflight-failed transport-lossy result-before-ack terminated-before-result dispatch-confirmed-absent never-dispatched"
+
+v2_schema_result() { # <staged-file> <display-name>
+  v2_rs_f="$1" v2_rs_n="$2"
+  for v2_rs_k in assignment_ref dispatch_ref ack_ref result_capture_ref status result_sha observed_at; do
+    v2_fm_has "$v2_rs_f" "$v2_rs_k" || { v2_fail MISSING_KEY "$v2_rs_n" "missing $v2_rs_k"; return 1; }
+  done
+}
+
+v2_check_results() {
+  while read -r v2_rr_seq v2_rr_kind v2_rr_name v2_rr_file; do
+    [ -n "${v2_rr_seq:-}" ] || continue
+    [ "$v2_rr_kind" = result ] || continue
+
+    v2_rr_status="$(v2_fm_get "$v2_rr_file" status)"
+    v2_rr_ackref="$(v2_fm_get "$v2_rr_file" ack_ref)"
+    v2_rr_capref="$(v2_fm_get "$v2_rr_file" result_capture_ref)"
+    v2_rr_reason="$(v2_fm_get "$v2_rr_file" reason)"
+
+    # A VERIFIED result claims the work was delivered AND that its report is the one the participant
+    # finalized. Both claims need a record behind them; neither may be asserted from memory.
+    if [ "$v2_rr_status" = VERIFIED ]; then
+      if [ "$v2_rr_ackref" = null ] || [ -z "$v2_rr_ackref" ]; then
+        v2_fail RESULT_ACK_REF "$v2_rr_name" "VERIFIED requires a valid ACK; ack_ref is null"
+      elif ! v2_resolve_ref "$v2_rr_ackref" ack >/dev/null; then
+        v2_ref_target_already_faulted "$v2_rr_ackref" \
+          || v2_fail RESULT_ACK_REF "$v2_rr_name" "ack_ref '$v2_rr_ackref' is not an ack record of this topic"
+      fi
+      if [ "$v2_rr_capref" = null ] || [ -z "$v2_rr_capref" ]; then
+        v2_fail RESULT_CAPTURE_REF "$v2_rr_name" "VERIFIED requires a matching result-capture; result_capture_ref is null"
+      elif ! v2_resolve_ref "$v2_rr_capref" result-capture >/dev/null; then
+        v2_ref_target_already_faulted "$v2_rr_capref" \
+          || v2_fail RESULT_CAPTURE_REF "$v2_rr_name" "result_capture_ref '$v2_rr_capref' is not a result-capture record of this topic"
+      fi
+    elif [ "$v2_rr_ackref" = null ]; then
+      # A failure result may carry no ACK, but only where no acknowledgement COULD exist. Anywhere
+      # else, a null here would quietly excuse the missing delivery evidence this protocol exists to
+      # obtain.
+      v2_in_list "$v2_rr_reason" "$V2_ACK_NULL_REASONS" \
+        || v2_fail RESULT_ACK_REF "$v2_rr_name" "ack_ref: null is legal only for a preflight decline, transport loss, or a fenced result-before-ACK (got reason=$v2_rr_reason)"
+    elif [ -n "$v2_rr_ackref" ] && ! v2_resolve_ref "$v2_rr_ackref" ack >/dev/null; then
+      v2_ref_target_already_faulted "$v2_rr_ackref" \
+        || v2_fail RESULT_ACK_REF "$v2_rr_name" "ack_ref '$v2_rr_ackref' is not an ack record of this topic"
+    fi
+
+    if [ -n "$v2_rr_capref" ] && [ "$v2_rr_capref" != null ] \
+       && ! v2_resolve_ref "$v2_rr_capref" result-capture >/dev/null; then
+      v2_ref_target_already_faulted "$v2_rr_capref" \
+        || v2_fail RESULT_CAPTURE_REF "$v2_rr_name" "result_capture_ref '$v2_rr_capref' is not a result-capture record of this topic"
+    fi
+  done <"$V2_SORTED"
+}
 v2_schema_fence()          { :; }   # Task 7
 v2_schema_late()           { :; }   # Task 7
 v2_schema_owner_question() { :; }   # Task 8

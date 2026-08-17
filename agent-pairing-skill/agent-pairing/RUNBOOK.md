@@ -182,6 +182,44 @@ with `git apply --3way`, commit with the attempt trailers plus `On-behalf-of` an
 
 ---
 
+## Report channels and relay
+
+Participant reporting **never updates a Git ref and never uses Git notes.** v1's participant manual
+required a Git note while simultaneously forbidding ref updates; the admitted `report_channel` is now
+the only authority.
+
+| `report_channel` | The participant returns bytes by | The primary captures them from |
+| --- | --- | --- |
+| `transport-output` | its transport's own output stream | that stream, verbatim |
+| `human-relay` | a fenced `RELAY-THIS` block the owner passes along | the fenced block, verbatim |
+
+Either way the participant finalizes the bytes **once** and declares a manifest with them:
+
+```yaml
+byte_count: <LC_ALL=C wc -c>
+sha256: <shasum -a 256>
+encoding: utf-8
+trailing_newline: present | absent
+```
+
+The primary writes those bytes to `artifacts/tTTTT-aAA/report.md` without normalization, recomputes
+the same four facts, and commits the artifact together with the `result-capture` record before
+interpreting anything. Both manifests are stored. A disagreement is `ABORTED: transport-lossy` under
+a clean stationary worktree, or `REJECTED` with a quarantined branch if something landed — never a
+repair.
+
+Getting the byte count right is a real trap on a relayed report: `wc -c` under a UTF-8 locale still
+counts bytes, but a report copied through an editor that strips or adds a final newline changes both
+the count and the digest. That is the failure the manifest exists to catch, so do not "fix" a
+mismatch by recounting — record it.
+
+For a relay patch, store it as `artifacts/tTTTT-aAA/patch.diff` with its own `patch_base_sha`,
+`patch_byte_count` and `patch_sha256`. A patch is admissible only under
+`capability: writes-repo-only`; `read-only` is report-only by contract and `commits` lands its own
+commit instead.
+
+---
+
 ## Finding a lost job (the `DISPATCH_UNKNOWN` path)
 
 When replay finds an intent with no dispatch receipt, the *first* move is a token search, because a
