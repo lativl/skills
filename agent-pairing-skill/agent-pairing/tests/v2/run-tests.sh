@@ -26,7 +26,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version common admission clocks ack capture templates"
+V2_GROUPS="version common admission clocks ack capture fence templates"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -379,6 +379,49 @@ if v2_group capture; then
   # is not one of those cases: the work WAS delivered, so the delivery evidence must still be cited.
   v2_expect_only_violation "a null ack_ref needs a reason that explains the absence" \
     capture/result-null-ack-bad-reason RESULT_ACK_REF
+fi
+
+# --- fence: the durable timeout boundary ---------------------------------------------------------------
+# A timeout comparison changes NOTHING. Only a committed `fence-initiated` record moves an attempt,
+# and the validator never compares a due epoch with the current time — it checks that a committed
+# fence was observed no earlier than its own stored due epoch, and that the due epoch is the bound
+# actually stored on the receipt or ACK.
+if v2_group fence; then
+  v2_expect_classification "a receipt with no ACK waits" fence/awaiting-ack AWAITING_ACK
+  v2_expect_classification "an ACK-timeout fence supersedes AWAITING_ACK" fence/ack-timeout-fenced FENCING
+  v2_expect_classification "a work-timeout fence supersedes WORKING" fence/work-timeout-fenced FENCING
+
+  # RESULT_BUFFERED is the single capture-derived state, and it applies ONLY when the ACK is absent.
+  # The protocol never synthesizes an "implied-at-result" acknowledgement.
+  v2_expect_classification "a capture with no ACK is buffered, not acknowledged" \
+    fence/capture-before-ack RESULT_BUFFERED
+  # WORKING is ACK-anchored and capture-insensitive: a valid ACK with no terminal result is WORKING
+  # whether or not a capture exists. The capture changes the primary's next ACTION, not the state.
+  v2_expect_classification "a buffered capture plus a later ACK is WORKING" \
+    fence/capture-then-ack WORKING
+  v2_expect_classification "a buffered capture plus a fence is FENCING" \
+    fence/capture-then-fence FENCING
+
+  # After the fence commits, late evidence is an observation against the boundary. Nothing reopens.
+  v2_expect_classification "a late ACK after a fence cannot reopen the attempt" \
+    fence/late-after-fence FENCING
+  v2_expect_classification "a late landed commit after a fence cannot reopen the attempt" \
+    fence/late-commit-after-fence FENCING
+
+  v2_expect_only_violation "a fence cannot be observed before its own due epoch" \
+    fence/fence-before-due FENCE_OBSERVED
+  v2_expect_only_violation "a fence's due epoch is the bound stored on the receipt" \
+    fence/fence-wrong-due FENCE_DUE
+  # The design's key is `trigger`. `reason` is NOT an accepted alias: silently accepting it would let
+  # two spellings of the same field diverge, and one of them would stop being checked.
+  v2_expect_only_violation "reason is not an alias for trigger" \
+    fence/fence-reason-alias MISSING_KEY
+  v2_expect_only_violation "a work-timeout fence names the ACK whose budget expired" \
+    fence/work-fence-null-ack FENCE_ACK_REF
+  v2_expect_only_violation "an ACK-timeout fence carries no ack_ref" \
+    fence/ack-fence-with-ack FENCE_ACK_REF
+  v2_expect_only_violation "one attempt is fenced at most once" \
+    fence/second-fence FENCE_DUP
 fi
 
 # --- templates: the canonical bodies instantiate into a VALID topic ------------------------------------

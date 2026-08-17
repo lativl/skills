@@ -265,7 +265,30 @@ is an operator setting, not a protocol rule.
   reason to re-dispatch.
 - **A bound that has passed is an observation, not a state change.** `validate.sh` prints the stored
   due epochs and never compares them with the clock. Nothing changes until you commit a
-  `fence-initiated` record — see *Durable fencing* in `SKILL.md`.
+  `fence-initiated` record — see *FENCE — durable timeout boundary* in `SKILL.md`.
+
+### Fencing an expired bound
+
+```text
+1. Read the stored bound from the record (ack_due_epoch on the receipt, work_due_epoch on the ACK).
+2. Compare it with your own clock. If it has not passed, stop — there is nothing to do.
+3. Commit fence-initiated, copying that exact due_epoch and stamping observed_epoch = now.
+4. ONLY NOW ask the transport to terminate the job.
+5. Confirm termination by job_id (per-transport commands above).
+6. Record any late arrival as a `late` record. It cancels nothing.
+```
+
+Step 3 before step 4 is not a style preference. Terminating first and recording afterwards means a
+crash in between leaves a killed job and a history that never mentions it — and the next primary,
+seeing an open attempt with no fence, has no way to distinguish that from a job still running.
+
+The `late` record is where a post-fence ACK, report, or landed commit goes. It is preserved as
+evidence and never promoted: a late ACK is not an ACK for a fenced attempt, and a late landed commit
+is `REJECTED: result-before-ack` with the branch quarantined.
+
+**Retry remains forbidden** after a fence until termination is directly confirmed or the owner
+materializes a resolution. This is the rule the whole fence exists to protect: a missing ACK is
+missing evidence, not evidence of death.
 
 ### Recovering an uncommitted receipt
 

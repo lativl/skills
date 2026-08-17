@@ -571,12 +571,42 @@ three turns later as unexplained drift.
 
 ---
 
-## FENCE — deadlines, liveness, and never re-dispatching into uncertainty
+## FENCE — durable timeout boundary
 
 Completion and liveness are different questions, and a commit appears only at the end of a turn.
-Deadlines are checked **when you look** — there are no daemons, timers, or background waiters here,
-and "poll for N minutes" is a promise this protocol does not make. When the deadline on the open
-assignment has passed, walk this ladder in order:
+Bounds are checked **when you look** — there are no daemons, timers, or background waiters here, and
+"poll for N minutes" is a promise this protocol does not make.
+
+**Noticing that a bound has passed changes nothing.** It is an observation. The state does not move
+until you commit a `fence-initiated` record, and you commit that record **before** asking the
+transport to terminate the job.
+
+That ordering is the whole mechanism. A primary that crashes between noticing and terminating leaves
+either no fence — in which case nothing happened — or a committed fence, in which case the boundary
+is in the history where the next primary can see it. There is no third state in which a job was
+terminated and the record does not know.
+
+```text
+ack_due_epoch passed,  no ACK       →  commit fence-initiated: trigger: ack-timeout,  ack_ref: null
+work_due_epoch passed, no result    →  commit fence-initiated: trigger: work-timeout, ack_ref: <the ACK>
+```
+
+`due_epoch` is the bound actually stored on the receipt or the ACK — copy it, do not recompute it.
+`observed_epoch` is when you looked, and it cannot precede `due_epoch`.
+
+**After the fence commits:**
+
+- A late ACK, capture, result, or landed commit is an observation against the boundary. Record it as
+  a `late` record. It is evidence, and it is preserved.
+- **No late event cancels the fence or reopens the attempt.** An ACK that arrives after the fence
+  does not mean the fence was wrong; it means the acknowledgement arrived after the boundary.
+- **Retry stays forbidden** until you have direct termination evidence or an owner-materialized
+  resolution. Missing ACK proves only that no acknowledgement was captured. It never proves the
+  participant is dead, and it never proves redispatch is safe — that inference is how two agents end
+  up in one worktree.
+- One attempt is fenced at most once. A fence is a boundary, not a retry.
+
+Then walk this ladder in order:
 
 1. **Check progress, not process.** New commits in the session worktree? Job output advancing?
 

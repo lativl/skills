@@ -67,6 +67,7 @@ V2_WORK="$(mktemp -d /tmp/agent-pairing-v2.XXXXXX)" \
 
 . "$V2_SELF_DIR/lib/v2-record.sh" || { printf 'FATAL cannot load lib/v2-record.sh\n' >&2; exit 3; }
 . "$V2_SELF_DIR/lib/v2-schema.sh" || { printf 'FATAL cannot load lib/v2-schema.sh\n' >&2; exit 3; }
+. "$V2_SELF_DIR/lib/v2-replay.sh" || { printf 'FATAL cannot load lib/v2-replay.sh\n' >&2; exit 3; }
 
 # --- the record repository -----------------------------------------------------------------------------
 v2_git "$V2_TOPIC" rev-parse --git-dir >/dev/null 2>&1 \
@@ -235,6 +236,7 @@ v2_check_clocks
 v2_check_acks
 v2_check_captures "$V2_TOPIC"
 v2_check_results
+v2_check_fences
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
 
@@ -260,15 +262,19 @@ v2_print_due_epochs
 # Tasks 3-8 replace this with the full replay precedence. Until then only the no-attempt branch is
 # pinned: a topic with no admission has no participant, and one with an admission and nothing else is
 # idle.
-V2_ADMISSION_COUNT="$(awk '$2 == "admission"' "$V2_SORTED" | grep -c . || true)"
-V2_RECORD_COUNT="$(grep -c . "$V2_SORTED" || true)"
+V2_ADMISSION_COUNT="$(v2_count_kind admission)"
+V2_OPEN="$(v2_open_attempt)"
 
 if [ "$V2_ADMISSION_COUNT" -eq 0 ]; then
+  # No admission means no participant. Selecting owner-manual at OPEN is not admission: an ACK or
+  # work budget started here would be a clock running against nobody.
   printf 'classification: AWAITING_PARTICIPANT\n'
-elif [ "$V2_RECORD_COUNT" -eq "$V2_ADMISSION_COUNT" ]; then
-  printf 'classification: IDLE\n'
+elif [ -n "$V2_OPEN" ]; then
+  printf 'classification: %s\n' "$(v2_classify_open_attempt $V2_OPEN)"
 else
-  printf 'classification: WORKING\n'
+  # Task 8 replaces this with the full precedence: close boundary, owner questions, quarantine and
+  # drift all outrank a bare IDLE.
+  printf 'classification: IDLE\n'
 fi
 
 exit 0

@@ -818,8 +818,96 @@ v2_check_results() {
     fi
   done <"$V2_SORTED"
 }
-v2_schema_fence()          { :; }   # Task 7
-v2_schema_late()           { :; }   # Task 7
+# --- fence-initiated: the durable timeout boundary ------------------------------------------------------
+V2_FENCE_TRIGGERS="ack-timeout work-timeout"
+
+v2_schema_fence() { # <staged-file> <display-name>
+  v2_fc_f="$1" v2_fc_n="$2"
+  # `trigger` is the design's key. `reason` is NOT an alias — accepting both spellings is how one of
+  # them quietly stops being checked — so a record carrying `reason` reports a MISSING trigger.
+  for v2_fc_k in trigger assignment_ref dispatch_ref ack_ref job_id due_epoch observed_epoch; do
+    v2_fm_has "$v2_fc_f" "$v2_fc_k" || { v2_fail MISSING_KEY "$v2_fc_n" "missing $v2_fc_k"; return 1; }
+  done
+  v2_fc_tr="$(v2_fm_get "$v2_fc_f" trigger)"
+  v2_in_list "$v2_fc_tr" "$V2_FENCE_TRIGGERS" \
+    || { v2_fail FENCE_TRIGGER "$v2_fc_n" "trigger=$v2_fc_tr is not one of: $V2_FENCE_TRIGGERS"; return 1; }
+
+  v2_fc_due="$(v2_fm_get "$v2_fc_f" due_epoch)"
+  v2_fc_obs="$(v2_fm_get "$v2_fc_f" observed_epoch)"
+  v2_uint_value "$v2_fc_due" >/dev/null 2>&1 \
+    || { v2_fail EPOCH_RANGE "$v2_fc_n" "due_epoch='$v2_fc_due' is not a decimal integer within the exact range"; return 1; }
+  v2_uint_value "$v2_fc_obs" >/dev/null 2>&1 \
+    || { v2_fail EPOCH_RANGE "$v2_fc_n" "observed_epoch='$v2_fc_obs' is not a decimal integer within the exact range"; return 1; }
+
+  # The validator has no clock, so this is the ONLY temporal claim it can check: the primary says it
+  # observed an expiry, and an observation cannot precede the expiry it claims to have observed.
+  [ "$v2_fc_obs" -ge "$v2_fc_due" ] \
+    || v2_fail FENCE_OBSERVED "$v2_fc_n" "observed_epoch $v2_fc_obs precedes due_epoch $v2_fc_due; a fence cannot observe an expiry that has not happened"
+
+  # `ack_ref: null` is not an omission — it is the ACK-timeout fence saying there is no ACK, which is
+  # the whole reason it exists. A work-timeout fence must name the ACK whose budget expired.
+  v2_fc_ar="$(v2_fm_get "$v2_fc_f" ack_ref)"
+  case "$v2_fc_tr" in
+    ack-timeout)
+      [ "$v2_fc_ar" = null ] \
+        || v2_fail FENCE_ACK_REF "$v2_fc_n" "an ack-timeout fence carries ack_ref: null (got '$v2_fc_ar'); if an ACK exists, the ACK budget did not expire" ;;
+    work-timeout)
+      [ "$v2_fc_ar" != null ] && [ -n "$v2_fc_ar" ] \
+        || v2_fail FENCE_ACK_REF "$v2_fc_n" "a work-timeout fence must name the ACK whose work budget expired" ;;
+  esac
+}
+
+# The cross-record half: the due epoch must be the bound ACTUALLY STORED on the receipt or the ACK,
+# and one attempt is fenced at most once.
+v2_check_fences() {
+  while read -r v2_fk_seq v2_fk_kind v2_fk_name v2_fk_file; do
+    [ -n "${v2_fk_seq:-}" ] || continue
+    [ "$v2_fk_kind" = fence-initiated ] || continue
+
+    v2_fk_t="$(v2_fm_get "$v2_fk_file" turn_id)"
+    v2_fk_a="$(v2_fm_get "$v2_fk_file" attempt_id)"
+    v2_fk_n2="$(awk -v t="$v2_fk_t" -v a="$v2_fk_a" '
+      $2 == "fence-initiated" { print $4 }' "$V2_SORTED" \
+      | while read -r v2_fk_p; do
+          [ "$(v2_fm_get "$v2_fk_p" turn_id)" = "$v2_fk_t" ] \
+            && [ "$(v2_fm_get "$v2_fk_p" attempt_id)" = "$v2_fk_a" ] && printf 'x\n'
+        done | grep -c . || true)"
+    if [ "$v2_fk_n2" -gt 1 ]; then
+      # Reported against the LATER record only, so one duplication is one violation.
+      v2_fk_first="$(awk '$2 == "fence-initiated" { print $3; exit }' "$V2_SORTED")"
+      [ "$v2_fk_name" = "$v2_fk_first" ] \
+        || v2_fail FENCE_DUP "$v2_fk_name" "attempt t$v2_fk_t-a$v2_fk_a is already fenced by $v2_fk_first; a fence is a boundary, not a retry"
+    fi
+
+    v2_fk_tr="$(v2_fm_get "$v2_fk_file" trigger)"
+    v2_fk_due="$(v2_fm_get "$v2_fk_file" due_epoch)"
+    case "$v2_fk_tr" in
+      ack-timeout)
+        v2_fk_dp="$(v2_resolve_ref "$(v2_fm_get "$v2_fk_file" dispatch_ref)" dispatch)" || v2_fk_dp=""
+        [ -n "$v2_fk_dp" ] || continue
+        [ "$v2_fk_due" = "$(v2_fm_get "$v2_fk_dp" ack_due_epoch)" ] \
+          || v2_fail FENCE_DUE "$v2_fk_name" "due_epoch $v2_fk_due is not the receipt's ack_due_epoch $(v2_fm_get "$v2_fk_dp" ack_due_epoch)"
+        [ "$(v2_fm_get "$v2_fk_file" job_id)" = "$(v2_fm_get "$v2_fk_dp" job_id)" ] \
+          || v2_fail FENCE_DUE "$v2_fk_name" "job_id differs from the receipt's job_id" ;;
+      work-timeout)
+        v2_fk_kp="$(v2_resolve_ref "$(v2_fm_get "$v2_fk_file" ack_ref)" ack)" || v2_fk_kp=""
+        [ -n "$v2_fk_kp" ] || continue
+        [ "$v2_fk_due" = "$(v2_fm_get "$v2_fk_kp" work_due_epoch)" ] \
+          || v2_fail FENCE_DUE "$v2_fk_name" "due_epoch $v2_fk_due is not the ACK's work_due_epoch $(v2_fm_get "$v2_fk_kp" work_due_epoch)" ;;
+    esac
+  done <"$V2_SORTED"
+}
+
+v2_schema_late() { # <staged-file> <display-name>
+  v2_lt_f="$1" v2_lt_n="$2"
+  for v2_lt_k in assignment_ref named_sha; do
+    v2_fm_has "$v2_lt_f" "$v2_lt_k" || { v2_fail MISSING_KEY "$v2_lt_n" "missing $v2_lt_k"; return 1; }
+  done
+  v2_lt_sha="$(v2_fm_get "$v2_lt_f" named_sha)"
+  if [ "$v2_lt_sha" != null ]; then
+    v2_is_sha "$v2_lt_sha" || v2_fail BAD_SHA "$v2_lt_n" "named_sha=$v2_lt_sha"
+  fi
+}
 v2_schema_owner_question() { :; }   # Task 8
 v2_schema_owner_answer()   { :; }   # Task 8
 v2_schema_close()          { :; }   # Task 8
