@@ -2,7 +2,7 @@
 protocol_version: 2
 record_seq: 0006
 kind: result-capture
-topic_id: readonly-with-patch
+topic_id: patch-sha-mismatch
 turn_id: 0001
 attempt_id: 01
 turn_kind: NORMAL
@@ -20,8 +20,8 @@ encoding: utf-8
 trailing_newline: present
 patch_ref: artifacts/t0001-a01/patch.diff
 patch_base_sha: 1111111111111111111111111111111111111111
-patch_byte_count: 19
-patch_sha256: 1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081
+patch_byte_count: 49
+patch_sha256: 0000000000000000000000000000000000000000000000000000000000000000
 captured_epoch: 1050
 ---
 Exact participant bytes, captured without normalization.

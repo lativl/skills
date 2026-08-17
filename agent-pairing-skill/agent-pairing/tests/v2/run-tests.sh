@@ -298,6 +298,11 @@ if v2_group clocks; then
     clocks/recovery-pre-crash-arithmetic RECOVERY_EPOCH
   v2_expect_only_violation "a pre-crash epoch cannot postdate the re-stamped commit" \
     clocks/recovery-pre-crash-after-dispatch RECOVERY_EPOCH
+  # The participant polls committed HEAD for exactly the name the intent predicted. A receipt under
+  # any other name means it polls until its bound expires and writes nothing, while replay would
+  # otherwise call the topic healthy and wait for an ACK that cannot arrive.
+  v2_expect_only_violation "the receipt is committed under the name the intent predicted" \
+    clocks/unexpected-dispatch-name EXPECTED_DISPATCH_REF
 fi
 
 # --- ack: the acknowledgement is the delivery evidence --------------------------------------------------
@@ -339,6 +344,10 @@ if v2_group ack; then
   # the participant first saw the prompt.
   v2_expect_only_violation "the work bound is the captured ACK epoch plus the work timeout" \
     ack/wrong-work-due WORK_DUE
+  # The participant learns of the work by observing the committed receipt, so an ACK ordered before
+  # that receipt acknowledges something it could not have seen.
+  v2_expect_only_violation "an ACK cannot precede the receipt it acknowledges" \
+    ack/ack-before-receipt LINK_ORDER
 fi
 
 # --- capture: exact participant bytes ---------------------------------------------------------------
@@ -379,6 +388,14 @@ if v2_group capture; then
   # is not one of those cases: the work WAS delivered, so the delivery evidence must still be cited.
   v2_expect_only_violation "a null ack_ref needs a reason that explains the absence" \
     capture/result-null-ack-bad-reason RESULT_ACK_REF
+
+  # Relayed patch bytes are about to be applied to the work repo. Verifying them only when the
+  # manifest happened to be present meant a capture could omit the four patch fields and the bytes
+  # were certified by nothing -- the stale-capture hole, reopened for the patch.
+  v2_expect_only_violation "a committed patch requires its manifest" \
+    capture/patch-without-manifest CAPTURE_PATCH_MANIFEST
+  v2_expect_only_violation "a patch digest that disagrees with the patch bytes" \
+    capture/patch-sha-mismatch CAPTURE_SHA256
 fi
 
 # --- fence: the durable timeout boundary ---------------------------------------------------------------
@@ -422,6 +439,11 @@ if v2_group fence; then
     fence/ack-fence-with-ack FENCE_ACK_REF
   v2_expect_only_violation "one attempt is fenced at most once" \
     fence/second-fence FENCE_DUP
+  # A fence's due epoch is its ONLY checkable temporal claim, so a reference that fails to resolve
+  # must be a violation and never a skip. Skipping let a fence with a dangling dispatch_ref and a
+  # fabricated due_epoch classify FENCING at exit 0.
+  v2_expect_only_violation "a fence cannot skip its due-epoch check by naming a missing receipt" \
+    fence/fence-dangling-dispatch FENCE_DUE
 fi
 
 # --- templates: the canonical bodies instantiate into a VALID topic ------------------------------------

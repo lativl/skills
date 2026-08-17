@@ -339,6 +339,37 @@ v2_ref_validated_kind() { # <ref-basename>
   awk -v n="$1" '$3 == n { print $2; exit }' "$V2_SORTED"
 }
 
+# Resolve a `*_ref` that must name a record of THIS attempt, and report one exact code when it does
+# not. Prints the staged path on success; returns 1 having already reported on failure.
+#
+# Resolving by (basename, kind) alone is not enough. Those two facts are topic-wide, so a fence on
+# attempt a02 could cite a01's receipt and then validate its own `due_epoch` against a01's stored
+# bound — the arithmetic would pass while describing a different attempt's timeout. Every reference
+# that carries attempt semantics goes through here so the tuple is checked with it.
+# The resolved path is returned in V2_REF_PATH, NOT on stdout. A helper that prints its result must
+# be called as `$(...)`, which runs it in a subshell — and every v2_fail it makes there increments a
+# violation counter that dies with that subshell. The check would report on stderr and the run would
+# still exit 0. State that crosses a subshell boundary has to be a file or a caller-side variable.
+V2_REF_PATH=""
+v2_resolve_attempt_ref() { # <ref> <kind> <referring-staged-file> <referring-name> <code>
+  v2_ra_ref="$1" v2_ra_kind="$2" v2_ra_from="$3" v2_ra_name="$4" v2_ra_code="$5"
+  V2_REF_PATH=""
+  v2_ra_p="$(v2_resolve_ref "$v2_ra_ref" "$v2_ra_kind")" || v2_ra_p=""
+  if [ -z "$v2_ra_p" ]; then
+    # A target dropped for its OWN defect already fails the run; do not also blame the referrer.
+    v2_ref_target_already_faulted "$v2_ra_ref" && return 1
+    v2_fail "$v2_ra_code" "$v2_ra_name" "$v2_ra_kind reference '$v2_ra_ref' resolves to no $v2_ra_kind record of this topic"
+    return 1
+  fi
+  for v2_ra_k in turn_id attempt_id; do
+    if [ "$(v2_fm_get "$v2_ra_from" "$v2_ra_k")" != "$(v2_fm_get "$v2_ra_p" "$v2_ra_k")" ]; then
+      v2_fail "$v2_ra_code" "$v2_ra_name" "cites '$v2_ra_ref', which belongs to attempt t$(v2_fm_get "$v2_ra_p" turn_id)-a$(v2_fm_get "$v2_ra_p" attempt_id), not this record's t$(v2_fm_get "$v2_ra_from" turn_id)-a$(v2_fm_get "$v2_ra_from" attempt_id)"
+      return 1
+    fi
+  done
+  V2_REF_PATH="$v2_ra_p"
+}
+
 # A reference whose TARGET was dropped for its own schema defect is not a dangling reference. The
 # target's own violation already fails the run; blaming the referring record too would report one
 # mutation as several codes and point at files that are not wrong. Returns 0 when the caller should
@@ -527,6 +558,17 @@ v2_check_clocks() {
       continue
     fi
 
+    # The receipt must be committed under the name the intent PREDICTED. The participant polls
+    # committed HEAD for exactly `expected_dispatch_ref`; a receipt landing under any other name
+    # means it polls until its bound expires and writes nothing, while replay would otherwise call
+    # the topic healthy and wait for an ACK that cannot come.
+    v2_ck_ip="$(v2_resolve_ref "$(v2_fm_get "$v2_ck_file" intent_ref)" intent)" || v2_ck_ip=""
+    if [ -n "$v2_ck_ip" ]; then
+      v2_ck_exp="$(v2_fm_get "$v2_ck_ip" expected_dispatch_ref)"
+      [ "$v2_ck_name" = "$v2_ck_exp" ] \
+        || v2_fail EXPECTED_DISPATCH_REF "$v2_ck_name" "the intent predicted the receipt would be '$v2_ck_exp'; the participant polls for that exact name"
+    fi
+
     # dispatch: ack_due_epoch == dispatched_epoch + the assignment's ack_timeout_seconds.
     v2_ck_de="$(v2_fm_get "$v2_ck_file" dispatched_epoch)"
     v2_ck_ad="$(v2_fm_get "$v2_ck_file" ack_due_epoch)"
@@ -579,25 +621,25 @@ v2_check_acks() {
     v2_ka_ap="$(v2_resolve_ref "$v2_ka_aref" assignment)" || v2_ka_ap=""
     [ -n "$v2_ka_ap" ] || continue   # LINK_DANGLING is v2_check_attempt_links' own code
 
+    # Every attempt-scoped reference goes through v2_resolve_attempt_ref, so "resolves to a record of
+    # the right kind" and "describes THIS attempt" are checked together. Resolving by kind alone is
+    # topic-wide, and an ACK citing another attempt's receipt is evidence of a delivery that is not
+    # the one under way.
     v2_ka_iref="$(v2_fm_get "$v2_ka_file" intent_ref)"
-    v2_ka_ip="$(v2_resolve_ref "$v2_ka_iref" intent)" || v2_ka_ip=""
+    v2_resolve_attempt_ref "$v2_ka_iref" intent "$v2_ka_file" "$v2_ka_name" ACK_BINDING || continue
+    v2_ka_ip="$V2_REF_PATH"
     v2_ka_dref="$(v2_fm_get "$v2_ka_file" dispatch_ref)"
-    v2_ka_dp="$(v2_resolve_ref "$v2_ka_dref" dispatch)" || v2_ka_dp=""
+    v2_resolve_attempt_ref "$v2_ka_dref" dispatch "$v2_ka_file" "$v2_ka_name" ACK_BINDING || continue
+    v2_ka_dp="$V2_REF_PATH"
+
+    # An ACK cannot precede the receipt it acknowledges: the participant learns of the work by
+    # observing that committed receipt, so an earlier ACK acknowledges something it could not have
+    # seen.
+    [ "$v2_ka_seq" \> "$(v2_fm_get "$v2_ka_dp" record_seq)" ] \
+      || v2_fail LINK_ORDER "$v2_ka_name" "acknowledges receipt '$v2_ka_dref', which does not precede it"
+
     v2_ka_adref="$(v2_fm_get "$v2_ka_file" admission_ref)"
     v2_ka_adp="$(v2_resolve_ref "$v2_ka_adref" admission)" || v2_ka_adp=""
-
-    # A reference to the wrong KIND of record is a binding failure, not a dangling link: the record
-    # exists, and the ACK is claiming it is something it is not.
-    if [ -z "$v2_ka_ip" ]; then
-      v2_ref_target_already_faulted "$v2_ka_iref" && continue
-      v2_fail ACK_BINDING "$v2_ka_name" "intent_ref '$v2_ka_iref' is not an intent record of this topic"
-      continue
-    fi
-    if [ -z "$v2_ka_dp" ]; then
-      v2_ref_target_already_faulted "$v2_ka_dref" && continue
-      v2_fail ACK_BINDING "$v2_ka_name" "dispatch_ref '$v2_ka_dref' is not a dispatch record of this topic"
-      continue
-    fi
     if [ -z "$v2_ka_adp" ]; then
       v2_ref_target_already_faulted "$v2_ka_adref" && continue
       v2_fail ACK_BINDING "$v2_ka_name" "admission_ref '$v2_ka_adref' is not an admission record of this topic"
@@ -654,6 +696,13 @@ v2_check_acks() {
           || v2_fail ACK_PREFLIGHT "$v2_ka_name" "preflight_clean must be null for an invisible admission (got '$v2_ka_clean')"
         [ "$v2_ka_relay" = "$v2_ka_base" ] \
           || v2_fail ACK_PREFLIGHT "$v2_ka_name" "relayed_base_sha '$v2_ka_relay' is not the assignment base_sha '$v2_ka_base'"
+        ;;
+      *)
+        # Unreachable while v2_schema_admission rejects a non-boolean worktree_visible and the run
+        # exits 2 before classification. Stated anyway: without it, a visibility the admission gate
+        # ever stopped rejecting would run NEITHER preflight arm, and the whole contract would be
+        # skipped in silence rather than failing.
+        v2_fail ACK_PREFLIGHT "$v2_ka_name" "the admission declares worktree_visible='$v2_ka_vis', which selects no preflight contract"
         ;;
     esac
 
@@ -734,6 +783,15 @@ v2_check_captures() { # <topic>
     [ "$(v2_fm_get "$v2_cp_file" trailing_newline)" = "$v2_cp_otn" ] \
       || v2_fail CAPTURE_NEWLINE "$v2_cp_name" "declares trailing_newline: $(v2_fm_get "$v2_cp_file" trailing_newline) but the committed artifact is $v2_cp_otn"
 
+    # The capture's own attempt-scoped references. `ack_ref: null` is the result-before-ACK path and
+    # is legal; a non-null one must name THIS attempt's ACK.
+    v2_cp_dref="$(v2_fm_get "$v2_cp_file" dispatch_ref)"
+    v2_resolve_attempt_ref "$v2_cp_dref" dispatch "$v2_cp_file" "$v2_cp_name" CAPTURE_REF || true
+    v2_cp_aref2="$(v2_fm_get "$v2_cp_file" ack_ref)"
+    if [ -n "$v2_cp_aref2" ] && [ "$v2_cp_aref2" != null ]; then
+      v2_resolve_attempt_ref "$v2_cp_aref2" ack "$v2_cp_file" "$v2_cp_name" CAPTURE_REF || true
+    fi
+
     # --- capability and the relay patch ------------------------------------------------------------------
     v2_cp_ap="$(v2_resolve_ref "$(v2_fm_get "$v2_cp_file" assignment_ref)" assignment)" || continue
     v2_cp_adp="$(v2_resolve_ref "$(v2_fm_get "$v2_cp_ap" admission_ref)" admission)" || continue
@@ -748,13 +806,29 @@ v2_check_captures() { # <topic>
         writes-repo-only) ;;
         *) v2_fail CAPABILITY_PATCH "$v2_cp_name" "capability: $v2_cp_cap admits no relay patch, but $v2_cp_patch is committed" ;;
       esac
-      if v2_fm_has "$v2_cp_file" patch_sha256; then
+      # A committed patch REQUIRES its manifest. Verifying only `if patch_sha256 is present` meant a
+      # capture could simply omit the four patch fields and the patch bytes — the ones about to be
+      # applied to the work repo — were certified by nothing at all. That is the stale-capture hole
+      # this task exists to close, reopened for the patch.
+      v2_cp_pmiss=""
+      for v2_cp_k in patch_ref patch_base_sha patch_byte_count patch_sha256; do
+        v2_fm_has "$v2_cp_file" "$v2_cp_k" || v2_cp_pmiss="$v2_cp_pmiss $v2_cp_k"
+      done
+      if [ -n "$v2_cp_pmiss" ]; then
+        v2_fail CAPTURE_PATCH_MANIFEST "$v2_cp_name" "$v2_cp_patch is committed but the capture declares no$v2_cp_pmiss; relayed patch bytes are never uncertified"
+      else
+        [ "$(v2_fm_get "$v2_cp_file" patch_ref)" = "$v2_cp_patch" ] \
+          || v2_fail CAPTURE_PATH "$v2_cp_name" "patch_ref '$(v2_fm_get "$v2_cp_file" patch_ref)' is not $v2_cp_patch"
+        v2_is_sha "$(v2_fm_get "$v2_cp_file" patch_base_sha)" \
+          || v2_fail BAD_SHA "$v2_cp_name" "patch_base_sha is not a 40-character hex SHA"
         v2_cp_pblob="$(v2_stage_committed "$v2_cp_topic" "$v2_cp_patch")" || v2_cp_pblob=""
-        if [ -n "$v2_cp_pblob" ]; then
+        if [ -z "$v2_cp_pblob" ]; then
+          v2_fail CAPTURE_PATH "$v2_cp_name" "$v2_cp_patch cannot be read from the committed tree"
+        else
           [ "$(v2_fm_get "$v2_cp_file" patch_byte_count)" = "$(v2_byte_count "$v2_cp_pblob")" ] \
-            || v2_fail CAPTURE_BYTES "$v2_cp_name" "patch_byte_count != the committed patch's byte count"
+            || v2_fail CAPTURE_BYTES "$v2_cp_name" "patch_byte_count $(v2_fm_get "$v2_cp_file" patch_byte_count) != the committed patch's $(v2_byte_count "$v2_cp_pblob") bytes"
           [ "$(v2_fm_get "$v2_cp_file" patch_sha256)" = "$(v2_sha256 "$v2_cp_pblob")" ] \
-            || v2_fail CAPTURE_SHA256 "$v2_cp_name" "patch_sha256 does not match the committed patch"
+            || v2_fail CAPTURE_SHA256 "$v2_cp_name" "patch_sha256 does not match the committed patch's digest $(v2_sha256 "$v2_cp_pblob")"
         fi
       fi
     elif v2_fm_has "$v2_cp_file" patch_ref; then
@@ -790,15 +864,13 @@ v2_check_results() {
     if [ "$v2_rr_status" = VERIFIED ]; then
       if [ "$v2_rr_ackref" = null ] || [ -z "$v2_rr_ackref" ]; then
         v2_fail RESULT_ACK_REF "$v2_rr_name" "VERIFIED requires a valid ACK; ack_ref is null"
-      elif ! v2_resolve_ref "$v2_rr_ackref" ack >/dev/null; then
-        v2_ref_target_already_faulted "$v2_rr_ackref" \
-          || v2_fail RESULT_ACK_REF "$v2_rr_name" "ack_ref '$v2_rr_ackref' is not an ack record of this topic"
+      else
+        v2_resolve_attempt_ref "$v2_rr_ackref" ack "$v2_rr_file" "$v2_rr_name" RESULT_ACK_REF || true
       fi
       if [ "$v2_rr_capref" = null ] || [ -z "$v2_rr_capref" ]; then
         v2_fail RESULT_CAPTURE_REF "$v2_rr_name" "VERIFIED requires a matching result-capture; result_capture_ref is null"
-      elif ! v2_resolve_ref "$v2_rr_capref" result-capture >/dev/null; then
-        v2_ref_target_already_faulted "$v2_rr_capref" \
-          || v2_fail RESULT_CAPTURE_REF "$v2_rr_name" "result_capture_ref '$v2_rr_capref' is not a result-capture record of this topic"
+      else
+        v2_resolve_attempt_ref "$v2_rr_capref" result-capture "$v2_rr_file" "$v2_rr_name" RESULT_CAPTURE_REF || true
       fi
     elif [ "$v2_rr_ackref" = null ]; then
       # A failure result may carry no ACK, but only where no acknowledgement COULD exist. Anywhere
@@ -806,15 +878,12 @@ v2_check_results() {
       # obtain.
       v2_in_list "$v2_rr_reason" "$V2_ACK_NULL_REASONS" \
         || v2_fail RESULT_ACK_REF "$v2_rr_name" "ack_ref: null is legal only for a preflight decline, transport loss, or a fenced result-before-ACK (got reason=$v2_rr_reason)"
-    elif [ -n "$v2_rr_ackref" ] && ! v2_resolve_ref "$v2_rr_ackref" ack >/dev/null; then
-      v2_ref_target_already_faulted "$v2_rr_ackref" \
-        || v2_fail RESULT_ACK_REF "$v2_rr_name" "ack_ref '$v2_rr_ackref' is not an ack record of this topic"
+    elif [ -n "$v2_rr_ackref" ]; then
+      v2_resolve_attempt_ref "$v2_rr_ackref" ack "$v2_rr_file" "$v2_rr_name" RESULT_ACK_REF || true
     fi
 
-    if [ -n "$v2_rr_capref" ] && [ "$v2_rr_capref" != null ] \
-       && ! v2_resolve_ref "$v2_rr_capref" result-capture >/dev/null; then
-      v2_ref_target_already_faulted "$v2_rr_capref" \
-        || v2_fail RESULT_CAPTURE_REF "$v2_rr_name" "result_capture_ref '$v2_rr_capref' is not a result-capture record of this topic"
+    if [ "$v2_rr_status" != VERIFIED ] && [ -n "$v2_rr_capref" ] && [ "$v2_rr_capref" != null ]; then
+      v2_resolve_attempt_ref "$v2_rr_capref" result-capture "$v2_rr_file" "$v2_rr_name" RESULT_CAPTURE_REF || true
     fi
   done <"$V2_SORTED"
 }
@@ -866,32 +935,43 @@ v2_check_fences() {
 
     v2_fk_t="$(v2_fm_get "$v2_fk_file" turn_id)"
     v2_fk_a="$(v2_fm_get "$v2_fk_file" attempt_id)"
-    v2_fk_n2="$(awk -v t="$v2_fk_t" -v a="$v2_fk_a" '
-      $2 == "fence-initiated" { print $4 }' "$V2_SORTED" \
-      | while read -r v2_fk_p; do
-          [ "$(v2_fm_get "$v2_fk_p" turn_id)" = "$v2_fk_t" ] \
-            && [ "$(v2_fm_get "$v2_fk_p" attempt_id)" = "$v2_fk_a" ] && printf 'x\n'
-        done | grep -c . || true)"
-    if [ "$v2_fk_n2" -gt 1 ]; then
-      # Reported against the LATER record only, so one duplication is one violation.
-      v2_fk_first="$(awk '$2 == "fence-initiated" { print $3; exit }' "$V2_SORTED")"
-      [ "$v2_fk_name" = "$v2_fk_first" ] \
-        || v2_fail FENCE_DUP "$v2_fk_name" "attempt t$v2_fk_t-a$v2_fk_a is already fenced by $v2_fk_first; a fence is a boundary, not a retry"
-    fi
 
+    # Duplicate detection is scoped to THIS attempt. Two fences on two different attempts are
+    # ordinary; only a second fence on the SAME attempt is a duplicate. Taking the globally-first
+    # fence-initiated record as "the first" blamed a record belonging to another attempt entirely,
+    # cited the wrong file, and reported one duplication twice.
+    v2_fk_first=""
+    while read -r v2_fk_s2 v2_fk_k2 v2_fk_n2 v2_fk_f2; do
+      [ -n "${v2_fk_s2:-}" ] || continue
+      [ "$v2_fk_k2" = fence-initiated ] || continue
+      [ "$(v2_fm_get "$v2_fk_f2" turn_id)" = "$v2_fk_t" ] || continue
+      [ "$(v2_fm_get "$v2_fk_f2" attempt_id)" = "$v2_fk_a" ] || continue
+      v2_fk_first="$v2_fk_n2"
+      break
+    done <"$V2_SORTED"
+    # Reported against the LATER record only, so one duplication is one violation.
+    [ "$v2_fk_name" = "$v2_fk_first" ] \
+      || v2_fail FENCE_DUP "$v2_fk_name" "attempt t$v2_fk_t-a$v2_fk_a is already fenced by $v2_fk_first; a fence is a boundary, not a retry"
+
+    # The due epoch is the ONE temporal claim a clockless validator can check, so a reference that
+    # fails to resolve must be a violation — never a `continue`. Skipping made a fence with a
+    # dangling dispatch_ref and a fabricated due_epoch classify FENCING at exit 0, which is the
+    # boundary's only checkable property bypassed entirely.
     v2_fk_tr="$(v2_fm_get "$v2_fk_file" trigger)"
     v2_fk_due="$(v2_fm_get "$v2_fk_file" due_epoch)"
     case "$v2_fk_tr" in
       ack-timeout)
-        v2_fk_dp="$(v2_resolve_ref "$(v2_fm_get "$v2_fk_file" dispatch_ref)" dispatch)" || v2_fk_dp=""
-        [ -n "$v2_fk_dp" ] || continue
+        v2_resolve_attempt_ref "$(v2_fm_get "$v2_fk_file" dispatch_ref)" dispatch \
+          "$v2_fk_file" "$v2_fk_name" FENCE_DUE || continue
+        v2_fk_dp="$V2_REF_PATH"
         [ "$v2_fk_due" = "$(v2_fm_get "$v2_fk_dp" ack_due_epoch)" ] \
           || v2_fail FENCE_DUE "$v2_fk_name" "due_epoch $v2_fk_due is not the receipt's ack_due_epoch $(v2_fm_get "$v2_fk_dp" ack_due_epoch)"
         [ "$(v2_fm_get "$v2_fk_file" job_id)" = "$(v2_fm_get "$v2_fk_dp" job_id)" ] \
           || v2_fail FENCE_DUE "$v2_fk_name" "job_id differs from the receipt's job_id" ;;
       work-timeout)
-        v2_fk_kp="$(v2_resolve_ref "$(v2_fm_get "$v2_fk_file" ack_ref)" ack)" || v2_fk_kp=""
-        [ -n "$v2_fk_kp" ] || continue
+        v2_resolve_attempt_ref "$(v2_fm_get "$v2_fk_file" ack_ref)" ack \
+          "$v2_fk_file" "$v2_fk_name" FENCE_ACK_REF || continue
+        v2_fk_kp="$V2_REF_PATH"
         [ "$v2_fk_due" = "$(v2_fm_get "$v2_fk_kp" work_due_epoch)" ] \
           || v2_fail FENCE_DUE "$v2_fk_name" "due_epoch $v2_fk_due is not the ACK's work_due_epoch $(v2_fm_get "$v2_fk_kp" work_due_epoch)" ;;
     esac
