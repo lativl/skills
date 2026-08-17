@@ -52,18 +52,34 @@ v2_materialize() {
   printf '%s\n' "$v2_dst"
 }
 
-# Run the default validator against a materialized fixture. Output (both streams) lands in $V2_OUT.
+# Run the default validator against a materialized fixture. Output (both streams) lands in $V2_OUT
+# and the validator's exit status in $V2_RC.
+#
+# $V2_OUT is TRUNCATED FIRST. Without that, a fixture that fails to materialize returns before the
+# validator ever runs, leaving the PREVIOUS case's output in place — and an assertion that greps
+# $V2_OUT then passes on a neighbour's evidence. A misspelled fixture path must be a loud failure,
+# not a silent green.
 v2_run() {
+  : >"$V2_OUT" || { echo "FATAL: cannot truncate $V2_OUT" >&2; return 1; }
+  V2_RC=127
   v2_topic="$(v2_materialize "$1")" || return 1
   V2_LAST_TOPIC="$v2_topic"
   "$V2_VALIDATE" --check "$v2_topic" >"$V2_OUT" 2>&1
+  V2_RC=$?
+  return $V2_RC
 }
 
 # Assert the validator refuses a fixture with one exact violation code.
+#
+# Exit 2 is required, not merely "nonzero". Exit 3 is a usage or environment failure and exit 127 is
+# a missing validator: neither is a protocol violation, and letting either satisfy this assertion is
+# how a suite reports coverage it does not have.
 v2_expect_violation() { # <name> <fixture> <code>
   v2_name="$1" v2_fixture="$2" v2_code="$3"
   if v2_run "$V2_FIXTURES/$v2_fixture"; then
     v2_nok "$v2_name" "validator unexpectedly returned zero"
+  elif [ "$V2_RC" -ne 2 ]; then
+    v2_nok "$v2_name" "expected exit 2 (protocol violation); got $V2_RC: $(sed -n '1p' "$V2_OUT")"
   elif grep -F "VIOLATION $v2_code" "$V2_OUT" >/dev/null; then
     v2_ok "$v2_name"
   else

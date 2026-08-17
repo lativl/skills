@@ -517,7 +517,13 @@ guard_files=""
 # shipped rev.6's unchecked-mktemp P0, and narrowing (j) left it covered by prose while the guard
 # watched two files that never had the defect. mk_scan takes arbitrary files; the [ -f ] keeps the
 # guard green before Task 8 creates it.
-for p in "$HERE/run-tests.sh" "$HERE/lib.sh" "$HERE/../pressure/run-scenario.sh"; do
+# PLAN DEVIATION (protocol-v2 Task 1, review finding): this list said `$HERE/run-tests.sh`, which
+# WAS this harness. After the v2 freeze renamed it to run-v1-tests.sh, that path resolved to the new
+# v2 package runner instead, and the D27/D28 scans silently stopped inspecting the 1955-line harness
+# they exist to protect. `$0` is the harness itself and cannot be retargeted by a future rename. The
+# v2 harness files join the set rather than replace it, so neither side loses coverage.
+for p in "$0" "$HERE/lib.sh" "$HERE/run-tests.sh" "$HERE/v2/run-tests.sh" "$HERE/v2/lib.sh" \
+         "$HERE/../pressure/run-scenario.sh"; do
   [ -f "$p" ] && guard_files="$guard_files $p"; done
 if [ -z "$guard_files" ]; then nok "harness files exist for the D27 guard" "none found under $HERE"
 else ok "harness files exist for the D27 guard"; fi
@@ -1846,8 +1852,8 @@ grep -rlE '\b[0-9a-f]{40}\b' "$HERE/../templates" >/dev/null 2>&1 \
 # only and the script's exit status would be the last `ok`/`nok` — always 0 — silently disarming
 # the Task 9 and Task 11 gates that read it.
 tail -1 "$0" | grep -q '^\[ "\$FAIL" -eq 0 \]$' \
-  && ok "the suite's exit expression is the last line of run-tests.sh" \
-  || nok "the suite's exit expression is the last line of run-tests.sh" "got: $(tail -1 "$0")"
+  && ok "the suite's exit expression is the last line of run-v1-tests.sh" \
+  || nok "the suite's exit expression is the last line of run-v1-tests.sh" "got: $(tail -1 "$0")"
 
 # --- Task 9 cases ---
 S="$HERE/../SKILL.md"

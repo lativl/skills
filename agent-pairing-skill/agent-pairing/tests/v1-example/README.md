@@ -82,9 +82,9 @@ Both readings are asserted by `tests/run-tests.sh`, together with render-stabili
 `THREAD.md` from the rehydrated record reproduces the committed file byte for byte.
 
 ```bash
-RT="$(/bin/bash example/rehydrate.sh --print-topic)"   # prints the restored topic dir
-/bin/bash scripts/validate.sh --check "$RT"            # → classification: CLOSED
-/bin/bash example/rehydrate.sh --clean                 # removes only its own marked directories
+RT="$(/bin/bash tests/v1-example/rehydrate.sh --print-topic)"   # prints the restored topic dir
+/bin/bash scripts/validate-v1.sh --check "$RT"                 # → classification: CLOSED
+/bin/bash tests/v1-example/rehydrate.sh --clean                # removes only its own marked directories
 ```
 
 `rehydrate.sh` never recreates the session worktree: the close postcondition requires that path
