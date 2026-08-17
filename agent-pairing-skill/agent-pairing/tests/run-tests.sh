@@ -20,8 +20,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # the SAME commit, and a lost case turns the gate red instead of passing quietly.
 #
 #   360  the frozen baseline recorded before any v2 work
-#   +1   Task 3  templates/admission.md        referenced by SKILL.md
-V1_EXPECTED_PASSES=361
+#   +1   Task 3  templates/admission.md         referenced by SKILL.md
+#   -2   Task 4  record-template instantiation MOVED to tests/v2 (group `templates`): v2 templates
+#                cannot produce a valid V1 topic by construction, so validating them with the v1
+#                validator asserted the opposite of the compatibility boundary
+V1_EXPECTED_PASSES=359
 
 V1_OUT="$(mktemp -t agent-pairing-v1-gate)" \
   || { echo "FATAL: cannot allocate the v1 gate output file" >&2; exit 3; }

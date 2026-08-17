@@ -1,4 +1,5 @@
 ---
+protocol_version: 2
 record_seq: {{RECORD_SEQ}}
 kind: assignment
 topic_id: {{TOPIC_ID}}
@@ -10,8 +11,12 @@ session_branch: {{SESSION_BRANCH}}
 session_worktree: {{SESSION_WORKTREE}}
 work_repo_common_dir: {{WORK_REPO_COMMON_DIR}}
 scope: {{SCOPE}}
-deadline: {{DEADLINE}}
 agent_id: {{AGENT_ID}}
+admission_ref: {{ADMISSION_REF}}
+ack_timeout_seconds: {{ACK_TIMEOUT_SECONDS}}
+work_timeout_seconds: {{WORK_TIMEOUT_SECONDS}}
+verification_profile_id: {{VERIFICATION_PROFILE_ID}}
+recorded_epoch: {{RECORDED_EPOCH}}
 recorded_at: {{RECORDED_AT}}
 ---
 Goal: state the requested outcome.

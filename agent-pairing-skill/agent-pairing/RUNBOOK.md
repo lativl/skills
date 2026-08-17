@@ -203,19 +203,41 @@ waiting for new evidence; if evidence later arrives, the token search can still 
 
 ---
 
-## Poll cadence and deadlines
+## Poll cadence and clocks
 
-There are no daemons, timers or watchers. Deadlines are checked when you look, so "how often you
-look" is an operator setting, not a protocol rule.
+There are no daemons, timers or watchers. Bounds are checked when you look, so "how often you look"
+is an operator setting, not a protocol rule.
 
 - **Current default: poll every 3 minutes** for a long-running dispatched job. (An older note in
   this environment says 4; the owner's stated preference is 3. Confirm before relying on either.)
-- Put the *deadline itself* in the assignment as a template value, sized to the job — not a global
-  constant.
+- v2 has **three** bounds, not one deadline. Size each to the job and write it into the record:
+
+  | Bound | Starts at | Stored on | Sized for |
+  | --- | --- | --- | --- |
+  | `receipt_commit_by_epoch` | the committed **intent** | intent | how long the participant should wait for a receipt to appear — seconds to a few minutes |
+  | `ack_due_epoch` | the committed **receipt** | receipt | delivery latency: submit-to-first-response, not the work |
+  | `work_due_epoch` | the captured **ACK** | ack | the task itself |
+
+  The admission's `default_ack_timeout_seconds` and `receipt_commit_timeout_seconds` are defaults;
+  the assignment and intent materialize their own copies, and the validator checks the arithmetic
+  against those copies. Never leave a bound to be inferred from configuration.
 - Poll in the **foreground**. Background waiters get killed, and their notifications can be routed
   to a session that no longer exists; a poll whose result nobody reads is not a poll.
 - A poll that shows no new commits and no advancing output is evidence for the fence ladder, not a
   reason to re-dispatch.
+- **A bound that has passed is an observation, not a state change.** `validate.sh` prints the stored
+  due epochs and never compares them with the clock. Nothing changes until you commit a
+  `fence-initiated` record — see *Durable fencing* in `SKILL.md`.
+
+### Recovering an uncommitted receipt
+
+Found a `dispatch` record in the record working tree that was never committed? Validate its exact
+tuple and required fields, then **re-stamp** it: fresh `dispatched_epoch` (now), `ack_due_epoch`
+recomputed from that, and the epoch from the original bytes preserved as
+`pre_crash_dispatched_epoch` with `receipt_source: validated-uncommitted`. That field is evidence
+only; the validator rejects a receipt whose `ack_due_epoch` was computed from it. Restoring the
+pre-crash epoch would hand the participant a budget that had already expired before it could see the
+receipt. If the bytes do not validate, hash them into one owner question before removing them.
 
 ---
 

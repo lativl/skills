@@ -26,7 +26,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version common admission"
+V2_GROUPS="version common admission clocks templates"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -256,6 +256,131 @@ if v2_group admission; then
     admission/commits-invisible CAPABILITY_VISIBILITY
   v2_expect_only_violation "a changed transport contract needs a new admission_id" \
     admission/admission-mutated ADMISSION_MUTATED
+fi
+
+# --- clocks: two durations, a receipt bound, and recovery provenance ----------------------------------
+if v2_group clocks; then
+  # The validator NEVER reads wall-clock time. It checks stored arithmetic and PRINTS the due epochs
+  # for the primary to compare against its own clock. A committed receipt starts only the ACK budget;
+  # a captured ACK starts the work budget.
+  v2_expect_line "the receipt's ACK budget is printed, not evaluated against now" \
+    common-valid "ack_due_epoch: 1630"
+  v2_expect_line "the captured ACK's work budget is printed" \
+    common-valid "work_due_epoch: 4640"
+  v2_expect_line "the intent's receipt bound is printed" \
+    common-valid "receipt_commit_by_epoch: 1320"
+
+  # Equal epochs are ordinary: several records can be stamped in one second, and record_seq breaks
+  # the tie. This must not be mistaken for a stalled or reordered history.
+  v2_expect_ok "records stamped in the same second are legal" clocks/same-second
+
+  v2_expect_only_violation "the intent repeats its assignment's admission_ref" \
+    clocks/intent-admission-ref ADMISSION_REF
+  v2_expect_only_violation "the intent's receipt timeout is the admitted one" \
+    clocks/intent-receipt-timeout RECEIPT_TIMEOUT
+  v2_expect_only_violation "the receipt bound is intent epoch plus the materialized timeout" \
+    clocks/receipt-commit-due RECEIPT_COMMIT_DUE
+  v2_expect_only_violation "the ACK bound is dispatched epoch plus the assignment's ACK timeout" \
+    clocks/ack-due ACK_DUE
+  v2_expect_only_violation "a v1 absolute deadline is rejected in a v2 assignment" \
+    clocks/legacy-deadline LEGACY_DEADLINE
+  v2_expect_only_violation "an epoch beyond the exact integer range is rejected" \
+    clocks/epoch-range EPOCH_RANGE
+
+  # A recovered uncommitted receipt is RE-STAMPED, never restored. Reusing the pre-crash epoch would
+  # publish an ACK budget that is already past at the moment the receipt first becomes visible to the
+  # participant — recreating the v1 pre-expired-deadline defect inside the recovery path. The ACK
+  # budget measures delivery latency, and the participant cannot observe an uncommitted receipt, so
+  # the budget must start when visibility starts.
+  v2_expect_only_violation "a recovered receipt records its pre-crash provenance" \
+    clocks/recovery-missing-epoch RECOVERY_EPOCH
+  v2_expect_only_violation "a recovered receipt's budget is not computed from the pre-crash epoch" \
+    clocks/recovery-pre-crash-arithmetic RECOVERY_EPOCH
+  v2_expect_only_violation "a pre-crash epoch cannot postdate the re-stamped commit" \
+    clocks/recovery-pre-crash-after-dispatch RECOVERY_EPOCH
+fi
+
+# --- templates: the canonical bodies instantiate into a VALID topic ------------------------------------
+# Moved here from the v1 harness in Task 4. A template is a contract with whoever fills it in: if the
+# canonical body cannot be instantiated into a topic the validator accepts, every agent following the
+# manual produces rejected records. Both halves matter — the validator must ACCEPT the result, and no
+# `{{TOKEN}}` may survive, because an unresolved token is a field nobody filled that still looks
+# filled. Each later task extends this with the template it adds.
+if v2_group templates; then
+  v2_case_templates() {
+    v2_n_valid="every record template instantiates into a valid v2 topic"
+    v2_n_token="no {{TOKEN}} survives template instantiation"
+    v2_tpl="$HERE/../../templates"
+    v2_t="$(mktemp -d "$V2_TMP/templated.XXXXXX")" || { v2_nok "$v2_n_valid" "temp failed"; return; }
+    mkdir -p "$v2_t/turns" || { v2_nok "$v2_n_valid" "cannot create turns/"; return; }
+
+    # Shared substitutions. The arithmetic is the same as common-valid's, so the materialized bounds
+    # are consistent by construction rather than by luck.
+    v2_sub() {
+      sed -e 's/{{TOPIC_ID}}/templated/' \
+          -e 's/{{PARTICIPANT_START_MODE}}/owner-manual/' \
+          -e 's/{{PARTICIPANT_SELECTION_SOURCE}}/initial-prompt/' \
+          -e 's/{{BASE_SHA}}/1111111111111111111111111111111111111111/' \
+          -e 's|{{BASE_REF}}|origin/dev|' \
+          -e 's|{{SESSION_BRANCH}}|pair/templated|' \
+          -e 's|{{SESSION_WORKTREE}}|/private/tmp/wt/templated|' \
+          -e 's|{{WORK_REPO_COMMON_DIR}}|/private/tmp/repo/.git|' \
+          -e 's|{{SCOPE}}|src/ docs/|' \
+          -e 's/{{TURN_KIND}}/NORMAL/' -e 's/{{TURN_ID}}/0001/' -e 's/{{ATTEMPT_ID}}/01/' \
+          -e 's/{{AGENT_ID}}/agent-a/' \
+          -e 's/{{RECORDED_AT}}/2026-08-14T10:00:00Z/' \
+          "$@"
+    }
+    v2_sub "$v2_tpl/TOPIC.md" >"$v2_t/TOPIC.md" || { v2_nok "$v2_n_valid" "cannot instantiate TOPIC.md"; return; }
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0001/' -e 's/{{RECORDED_EPOCH}}/1000/' \
+           -e 's/{{ADMISSION_ID}}/adm-0001/' -e 's/{{JOIN_MODE}}/owner-manual/' \
+           -e 's/{{TRANSPORT}}/human-relay/' -e 's/{{CAPABILITY}}/writes-repo-only/' \
+           -e 's/{{WORKTREE_VISIBLE}}/true/' -e 's/{{DURABLE_ADDRESS_KIND}}/human-relay/' \
+           -e 's/{{DURABLE_ADDRESS}}/owner-relay-desk/' -e 's/{{SEARCHABILITY}}/unsearchable/' \
+           -e 's/{{TOKEN_SEARCH_RECIPE_REF}}/null/' -e 's/{{REPORT_CHANNEL}}/human-relay/' \
+           -e 's/{{ACK_EVIDENCE_CLASS}}/human-relayed/' \
+           -e 's/{{RECEIPT_COMMIT_TIMEOUT_SECONDS}}/300/' -e 's/{{DEFAULT_ACK_TIMEOUT_SECONDS}}/600/' \
+           "$v2_tpl/admission.md" >"$v2_t/turns/0001-admission.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0002/' -e 's/{{RECORDED_EPOCH}}/1010/' \
+           -e 's/{{ADMISSION_REF}}/0001-admission.md/' \
+           -e 's/{{ACK_TIMEOUT_SECONDS}}/600/' -e 's/{{WORK_TIMEOUT_SECONDS}}/3600/' \
+           -e 's/{{VERIFICATION_PROFILE_ID}}/null/' \
+           "$v2_tpl/assignment.md" >"$v2_t/turns/0002-t0001-a01-assignment.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0003/' -e 's/{{RECORDED_EPOCH}}/1020/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{IDEMPOTENCY_TOKEN}}/tok-0001/' -e 's/{{ADMISSION_REF}}/0001-admission.md/' \
+           -e 's/{{EXPECTED_DISPATCH_REF}}/0004-t0001-a01-dispatch.md/' \
+           -e 's/{{RECEIPT_COMMIT_TIMEOUT_SECONDS}}/300/' -e 's/{{RECEIPT_COMMIT_BY_EPOCH}}/1320/' \
+           "$v2_tpl/intent.md" >"$v2_t/turns/0003-t0001-a01-intent.md"
+
+    v2_sub -e 's/{{RECORD_SEQ}}/0004/' -e 's/{{RECORDED_EPOCH}}/1030/' \
+           -e 's/{{ASSIGNMENT_REF}}/0002-t0001-a01-assignment.md/' \
+           -e 's/{{TRANSPORT}}/human-relay/' -e 's/{{JOB_ID}}/job-0001/' \
+           -e 's/{{INTENT_REF}}/0003-t0001-a01-intent.md/' -e 's/{{ADMISSION_REF}}/0001-admission.md/' \
+           -e 's/{{DISPATCHED_EPOCH}}/1030/' -e 's/{{ACK_DUE_EPOCH}}/1630/' \
+           -e 's/{{RECEIPT_SOURCE}}/direct/' \
+           "$v2_tpl/dispatch.md" >"$v2_t/turns/0004-t0001-a01-dispatch.md"
+
+    if grep -rl '{{[A-Z][A-Z0-9_]*}}' "$v2_t" >/dev/null 2>&1; then
+      v2_nok "$v2_n_token" "surviving token in $(grep -rl '{{[A-Z][A-Z0-9_]*}}' "$v2_t" | tr '\n' ' ')"
+    else
+      v2_ok "$v2_n_token"
+    fi
+
+    git -C "$v2_t" init -q && git -C "$v2_t" config user.name v2-test \
+      && git -C "$v2_t" config user.email v2@test && git -C "$v2_t" add -A \
+      && git -C "$v2_t" commit -qm templated \
+      || { v2_nok "$v2_n_valid" "cannot commit the instantiated topic"; return; }
+    if "$V2_VALIDATE" --check "$v2_t" >"$V2_OUT" 2>&1; then
+      v2_ok "$v2_n_valid"
+    else
+      v2_nok "$v2_n_valid" "validator refused the instantiated templates: $(sed -n '1p' "$V2_OUT")"
+    fi
+  }
+  v2_case_templates
 fi
 
 printf '\n%s passed, %s failed\n' "$V2_PASS" "$V2_FAIL"

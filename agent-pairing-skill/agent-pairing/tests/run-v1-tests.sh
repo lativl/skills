@@ -1836,8 +1836,17 @@ inst late       0005-t0001-a01-late-01.md \
 inst owner-question 0006-owner-question.md   -e 's/{{RECORD_SEQ}}/0006/' -e 's/{{QUESTION_ID}}/q-1/' -e 's/{{BLOCKS}}/t0002-a01/'
 inst owner-answer   0007-owner-answer.md     -e 's/{{RECORD_SEQ}}/0007/' -e 's/{{QUESTION_REF}}/q-1/' -e 's/{{ACTION}}/dispatch-unresolved/'
 inst close          0008-close.md            -e 's/{{RECORD_SEQ}}/0008/' -e 's/{{CLOSE_ID}}/c-1/' -e 's/{{FINAL_ACCEPTED_SHA}}/2222222222222222222222222222222222222222/'
-assert_check_ok "all eight record templates instantiate into a valid topic" "$d"
-grep -rq '{{' "$d/turns" && nok "no placeholder survives instantiation" "found {{" || ok "no placeholder survives instantiation"
+# PLAN DEVIATION (protocol-v2 Task 4): these two assertions MOVED to tests/v2/run-tests.sh, group
+# `templates`. They instantiated the RECORD templates and validated the result with the v1 validator.
+# Task 4 replaced the v1 absolute-time keys (`deadline`, `dispatched_at`) with v2 durations and
+# epochs, so a topic built from the shared templates can no longer be a valid V1 topic BY
+# CONSTRUCTION -- the v1 validator now correctly rejects it, and keeping the cases here would assert
+# that v2 templates produce v1 records. They are not deleted: the v2 suite instantiates every
+# template and both validates the result and scans for surviving tokens, which is the same coverage
+# against the validator that actually owns the grammar.
+#
+# The static template assertions below (existence, required sections, pinned keys, no literal SHAs,
+# TOPIC.md instantiation) stay here: they are grammar-independent and still meaningful.
 
 for t in TOPIC onboarding assignment intent dispatch result late owner-question owner-answer close; do
   [ -f "$HERE/../templates/$t.md" ] && ok "template exists: $t" || nok "template exists: $t" "missing"; done

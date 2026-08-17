@@ -230,8 +230,28 @@ while read -r v2_seq v2_kind v2_name v2_staged; do
 done <"$V2_SORTED"
 
 v2_check_admissions "$V2_SORTED"
+v2_check_attempt_links
+v2_check_clocks
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
+
+# --- stored due epochs ----------------------------------------------------------------------------------------
+# PRINTED, never evaluated. The validator has no clock: turning elapsed wall time into a state is the
+# primary's job, and it does that by committing a `fence-initiated` record. A validator that compared
+# a due epoch with `date +%s` would make replay depend on WHEN it ran, so the same records would
+# classify differently on two machines — and a timeout would take effect with nothing in the history
+# saying so.
+v2_print_due_epochs() {
+  while read -r v2_de_seq v2_de_kind v2_de_name v2_de_file; do
+    [ -n "${v2_de_seq:-}" ] || continue
+    case "$v2_de_kind" in
+      intent)   printf 'receipt_commit_by_epoch: %s\n' "$(v2_fm_get "$v2_de_file" receipt_commit_by_epoch)" ;;
+      dispatch) printf 'ack_due_epoch: %s\n' "$(v2_fm_get "$v2_de_file" ack_due_epoch)" ;;
+      ack)      printf 'work_due_epoch: %s\n' "$(v2_fm_get "$v2_de_file" work_due_epoch)" ;;
+    esac
+  done <"$V2_SORTED"
+}
+v2_print_due_epochs
 
 # --- classification -------------------------------------------------------------------------------------------
 # Tasks 3-8 replace this with the full replay precedence. Until then only the no-attempt branch is

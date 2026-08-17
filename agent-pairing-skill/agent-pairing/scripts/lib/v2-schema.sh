@@ -306,9 +306,246 @@ v2_check_admissions() { # <ordered record index>
   done <"$v2_ca_list"
 }
 
-v2_schema_assignment()     { :; }   # Task 4
-v2_schema_intent()         { :; }   # Task 4
-v2_schema_dispatch()       { :; }   # Task 4
+# --- clocks: two durations, a receipt bound, and recovery provenance -------------------------------------
+#
+# v1 put ONE absolute deadline on the assignment, before delivery latency was bounded at all — so a
+# receipt committed hours late published a deadline that had already passed. v2 replaces it with two
+# DURATIONS and materializes every addend into the record, so the validator can assert the arithmetic
+# from the records alone without consulting a mutable admission default or a wall clock.
+#
+# The keys v1 used for absolute time are forbidden outright rather than ignored. A v2 record carrying
+# `deadline` or `dispatched_at` is a record whose author was following the v1 manual, and silently
+# accepting it would let a v1 turn run under v2 instructions.
+V2_LEGACY_TIME_KEYS_assignment="deadline"
+V2_LEGACY_TIME_KEYS_dispatch="dispatched_at"
+V2_RECEIPT_SOURCES="direct token-search owner-answer validated-uncommitted"
+
+# Resolve a `*_ref` to the staged file of a record of the expected kind. Empty when it does not
+# resolve, which each caller reports with its own code.
+v2_resolve_ref() { # <ref-basename> <expected-kind>
+  [ -n "$1" ] || return 1
+  awk -v n="$1" -v k="$2" '$3 == n && $2 == k { print $4; found = 1; exit } END { exit !found }' "$V2_SORTED"
+}
+
+# Is this basename a COMMITTED record at all, whatever the state of its front matter?
+v2_ref_committed() { # <ref-basename>
+  [ -n "$1" ] || return 1
+  grep -Fxq "turns/$1" "$V2_WORK/records.sorted"
+}
+
+# Did it survive common validation? Empty when it was dropped for its own defect.
+v2_ref_validated_kind() { # <ref-basename>
+  [ -n "$1" ] || return 1
+  awk -v n="$1" '$3 == n { print $2; exit }' "$V2_SORTED"
+}
+
+# A reference whose TARGET was dropped for its own schema defect is not a dangling reference. The
+# target's own violation already fails the run; blaming the referring record too would report one
+# mutation as several codes and point at files that are not wrong. Returns 0 when the caller should
+# stay silent.
+v2_ref_target_already_faulted() { # <ref-basename>
+  v2_rt_ref="$1"
+  v2_ref_committed "$v2_rt_ref" || return 1
+  [ -z "$(v2_ref_validated_kind "$v2_rt_ref")" ]
+}
+
+v2_schema_assignment() { # <staged-file> <display-name>
+  v2_as_f="$1" v2_as_n="$2"
+  for v2_as_k in base_sha session_branch session_worktree work_repo_common_dir scope agent_id \
+                 admission_ref ack_timeout_seconds work_timeout_seconds verification_profile_id; do
+    v2_fm_has "$v2_as_f" "$v2_as_k" || { v2_fail MISSING_KEY "$v2_as_n" "missing $v2_as_k"; return 1; }
+  done
+  for v2_as_k in $V2_LEGACY_TIME_KEYS_assignment; do
+    ! v2_fm_has "$v2_as_f" "$v2_as_k" \
+      || v2_fail LEGACY_DEADLINE "$v2_as_n" "carries the v1 absolute-time key '$v2_as_k'; v2 assignments carry ack_timeout_seconds and work_timeout_seconds instead"
+  done
+  v2_is_sha "$(v2_fm_get "$v2_as_f" base_sha)" || v2_fail BAD_SHA "$v2_as_n" "base_sha"
+
+  # Materialized explicitly so replay never depends on mutable configuration. The ACK timeout
+  # DEFAULTS from the admission but is written here; the work duration is task-specific.
+  for v2_as_k in ack_timeout_seconds work_timeout_seconds; do
+    v2_as_v="$(v2_fm_get "$v2_as_f" "$v2_as_k")"
+    if ! v2_uint_value "$v2_as_v" >/dev/null 2>&1; then
+      v2_fail ASSIGNMENT_TIMEOUT "$v2_as_n" "$v2_as_k='$v2_as_v' is not a decimal integer within the exact range (1..$V2_EPOCH_MAX)"
+    elif [ "$v2_as_v" -eq 0 ]; then
+      v2_fail ASSIGNMENT_TIMEOUT "$v2_as_n" "$v2_as_k='$v2_as_v' is not a POSITIVE integer"
+    fi
+  done
+}
+
+v2_schema_intent() { # <staged-file> <display-name>
+  v2_in_f="$1" v2_in_n="$2"
+  for v2_in_k in assignment_ref idempotency_token admission_ref expected_dispatch_ref \
+                 receipt_commit_timeout_seconds receipt_commit_by_epoch; do
+    v2_fm_has "$v2_in_f" "$v2_in_k" || { v2_fail MISSING_KEY "$v2_in_n" "missing $v2_in_k"; return 1; }
+  done
+  [ -n "$(v2_fm_get "$v2_in_f" idempotency_token)" ] \
+    || v2_fail INTENT_TOKEN "$v2_in_n" "idempotency_token is empty"
+
+  v2_in_to="$(v2_fm_get "$v2_in_f" receipt_commit_timeout_seconds)"
+  if ! v2_uint_value "$v2_in_to" >/dev/null 2>&1 || [ "$v2_in_to" -eq 0 ]; then
+    v2_fail RECEIPT_TIMEOUT "$v2_in_n" "receipt_commit_timeout_seconds='$v2_in_to' is not a positive integer within the exact range"
+    return 1
+  fi
+
+  # `receipt_commit_by_epoch == recorded_epoch + receipt_commit_timeout_seconds`, asserted from THIS
+  # record alone. That is why the intent materializes the timeout instead of inheriting it: a bound
+  # checkable only against a mutable admission default is not checkable at replay time at all.
+  v2_in_ep="$(v2_fm_get "$v2_in_f" recorded_epoch)"
+  v2_in_by="$(v2_fm_get "$v2_in_f" receipt_commit_by_epoch)"
+  if ! v2_uint_value "$v2_in_by" >/dev/null 2>&1; then
+    v2_fail EPOCH_RANGE "$v2_in_n" "receipt_commit_by_epoch='$v2_in_by' is not a decimal integer within the exact range"
+  elif ! v2_sum_eq "$v2_in_ep" "$v2_in_to" "$v2_in_by"; then
+    v2_fail RECEIPT_COMMIT_DUE "$v2_in_n" "receipt_commit_by_epoch $v2_in_by != recorded_epoch $v2_in_ep + receipt_commit_timeout_seconds $v2_in_to"
+  fi
+}
+
+v2_schema_dispatch() { # <staged-file> <display-name>
+  v2_dp_f="$1" v2_dp_n="$2"
+  for v2_dp_k in assignment_ref intent_ref admission_ref transport job_id dispatched_epoch \
+                 ack_due_epoch receipt_source; do
+    v2_fm_has "$v2_dp_f" "$v2_dp_k" || { v2_fail MISSING_KEY "$v2_dp_n" "missing $v2_dp_k"; return 1; }
+  done
+  for v2_dp_k in $V2_LEGACY_TIME_KEYS_dispatch; do
+    ! v2_fm_has "$v2_dp_f" "$v2_dp_k" \
+      || v2_fail LEGACY_DEADLINE "$v2_dp_n" "carries the v1 absolute-time key '$v2_dp_k'; v2 receipts carry dispatched_epoch and ack_due_epoch instead"
+  done
+  [ -n "$(v2_fm_get "$v2_dp_f" job_id)" ] || v2_fail DISPATCH_JOB "$v2_dp_n" "job_id is empty"
+
+  v2_dp_src="$(v2_fm_get "$v2_dp_f" receipt_source)"
+  v2_in_list "$v2_dp_src" "$V2_RECEIPT_SOURCES" \
+    || v2_fail BAD_RECEIPT_SOURCE "$v2_dp_n" "receipt_source=$v2_dp_src is not one of: $V2_RECEIPT_SOURCES"
+
+  v2_dp_de="$(v2_fm_get "$v2_dp_f" dispatched_epoch)"
+  v2_uint_value "$v2_dp_de" >/dev/null 2>&1 \
+    || { v2_fail EPOCH_RANGE "$v2_dp_n" "dispatched_epoch='$v2_dp_de' is not a decimal integer within the exact range"; return 1; }
+  v2_dp_ad="$(v2_fm_get "$v2_dp_f" ack_due_epoch)"
+  v2_uint_value "$v2_dp_ad" >/dev/null 2>&1 \
+    || { v2_fail EPOCH_RANGE "$v2_dp_n" "ack_due_epoch='$v2_dp_ad' is not a decimal integer within the exact range"; return 1; }
+
+  # A recovered uncommitted receipt is RE-STAMPED, never restored. `dispatched_epoch` is the epoch at
+  # which the primary commits the recovered receipt; the pre-crash epoch found in the uncommitted
+  # bytes is evidence ONLY and never enters arithmetic. Restoring it would let `ack_due_epoch` be
+  # already past at the moment the receipt first becomes visible to the participant — recreating the
+  # v1 pre-expired-deadline defect inside the recovery path. The ACK budget measures delivery latency,
+  # and the participant cannot observe an uncommitted receipt, so the budget starts when visibility
+  # starts.
+  if [ "$v2_dp_src" = validated-uncommitted ]; then
+    if ! v2_fm_has "$v2_dp_f" pre_crash_dispatched_epoch; then
+      v2_fail RECOVERY_EPOCH "$v2_dp_n" "receipt_source: validated-uncommitted requires pre_crash_dispatched_epoch as evidence of the epoch it replaced"
+      return 1
+    fi
+    v2_dp_pc="$(v2_fm_get "$v2_dp_f" pre_crash_dispatched_epoch)"
+    if ! v2_uint_value "$v2_dp_pc" >/dev/null 2>&1; then
+      v2_fail RECOVERY_EPOCH "$v2_dp_n" "pre_crash_dispatched_epoch='$v2_dp_pc' is not a decimal integer within the exact range"
+      return 1
+    fi
+    if [ "$v2_dp_pc" -gt "$v2_dp_de" ]; then
+      v2_fail RECOVERY_EPOCH "$v2_dp_n" "pre_crash_dispatched_epoch $v2_dp_pc postdates the re-stamped dispatched_epoch $v2_dp_de; the recovered receipt is committed after the crash, never before it"
+      return 1
+    fi
+  elif v2_fm_has "$v2_dp_f" pre_crash_dispatched_epoch; then
+    v2_fail RECOVERY_EPOCH "$v2_dp_n" "pre_crash_dispatched_epoch is only meaningful for receipt_source: validated-uncommitted (got $v2_dp_src)"
+  fi
+}
+# --- cross-record linkage -------------------------------------------------------------------------------
+# Every attempt-linked record names its assignment, and the receipt additionally names its intent.
+# A reference that does not resolve, or resolves to a record describing a DIFFERENT attempt, is a
+# record whose place in the history is unknown.
+v2_check_attempt_links() {
+  while read -r v2_cl_seq v2_cl_kind v2_cl_name v2_cl_file; do
+    [ -n "${v2_cl_seq:-}" ] || continue
+    v2_in_list "$v2_cl_kind" "$V2_ATTEMPT_KINDS" || continue
+
+    v2_cl_aref="$(v2_fm_get "$v2_cl_file" assignment_ref)"
+    if [ "$v2_cl_kind" = assignment ]; then
+      v2_cl_ap="$v2_cl_file"
+    else
+      v2_cl_ap="$(v2_resolve_ref "$v2_cl_aref" assignment)" || v2_cl_ap=""
+      if [ -z "$v2_cl_ap" ]; then
+        v2_ref_target_already_faulted "$v2_cl_aref" && continue
+        v2_fail LINK_DANGLING "$v2_cl_name" "assignment_ref '$v2_cl_aref' resolves to no assignment record"
+        continue
+      fi
+      for v2_cl_k in topic_id turn_id attempt_id turn_kind; do
+        [ "$(v2_fm_get "$v2_cl_file" "$v2_cl_k")" = "$(v2_fm_get "$v2_cl_ap" "$v2_cl_k")" ] \
+          || v2_fail LINK_TUPLE_MISMATCH "$v2_cl_name" "$v2_cl_k differs from $v2_cl_aref"
+      done
+      [ "$v2_cl_seq" \> "$(v2_fm_get "$v2_cl_ap" record_seq)" ] \
+        || v2_fail LINK_ORDER "$v2_cl_name" "record precedes its own assignment"
+    fi
+
+    if [ "$v2_cl_kind" = dispatch ]; then
+      v2_cl_iref="$(v2_fm_get "$v2_cl_file" intent_ref)"
+      v2_cl_ip="$(v2_resolve_ref "$v2_cl_iref" intent)" || v2_cl_ip=""
+      if [ -z "$v2_cl_ip" ]; then
+        v2_ref_target_already_faulted "$v2_cl_iref" \
+          || v2_fail LINK_DANGLING "$v2_cl_name" "intent_ref '$v2_cl_iref' resolves to no intent record"
+      else
+        [ "$v2_cl_seq" \> "$(v2_fm_get "$v2_cl_ip" record_seq)" ] \
+          || v2_fail LINK_ORDER "$v2_cl_name" "receipt precedes its own intent"
+      fi
+    fi
+  done <"$V2_SORTED"
+}
+
+# --- cross-record clocks --------------------------------------------------------------------------------
+v2_check_clocks() {
+  while read -r v2_ck_seq v2_ck_kind v2_ck_name v2_ck_file; do
+    [ -n "${v2_ck_seq:-}" ] || continue
+    case "$v2_ck_kind" in assignment|intent|dispatch) ;; *) continue ;; esac
+
+    # Every clock-bearing record binds one exact admission. The intent REPEATS its assignment's
+    # admission_ref for the same reason it materializes the receipt timeout: replay must be able to
+    # check the binding from the records alone.
+    v2_ck_adref="$(v2_fm_get "$v2_ck_file" admission_ref)"
+    v2_ck_adp="$(v2_resolve_ref "$v2_ck_adref" admission)" || v2_ck_adp=""
+    if [ -z "$v2_ck_adp" ]; then
+      v2_ref_target_already_faulted "$v2_ck_adref" && continue
+      v2_fail ADMISSION_REF "$v2_ck_name" "admission_ref '$v2_ck_adref' resolves to no admission record"
+      continue
+    fi
+    [ "$v2_ck_seq" \> "$(v2_fm_get "$v2_ck_adp" record_seq)" ] \
+      || v2_fail ADMISSION_REF "$v2_ck_name" "binds admission '$v2_ck_adref', which does not precede it"
+
+    [ "$v2_ck_kind" = assignment ] && continue
+
+    v2_ck_ap="$(v2_resolve_ref "$(v2_fm_get "$v2_ck_file" assignment_ref)" assignment)" || continue
+    v2_ck_asadref="$(v2_fm_get "$v2_ck_ap" admission_ref)"
+    if [ "$v2_ck_adref" != "$v2_ck_asadref" ]; then
+      v2_fail ADMISSION_REF "$v2_ck_name" "binds admission '$v2_ck_adref' while its assignment binds '$v2_ck_asadref'"
+      continue
+    fi
+
+    if [ "$v2_ck_kind" = intent ]; then
+      # The materialized value must equal the ADMITTED one. Materializing it is what makes the bound
+      # checkable; materializing a DIFFERENT number would make it checkable and wrong.
+      v2_ck_ito="$(v2_fm_get "$v2_ck_file" receipt_commit_timeout_seconds)"
+      v2_ck_ato="$(v2_fm_get "$v2_ck_adp" receipt_commit_timeout_seconds)"
+      [ "$v2_ck_ito" = "$v2_ck_ato" ] \
+        || v2_fail RECEIPT_TIMEOUT "$v2_ck_name" "materializes receipt_commit_timeout_seconds $v2_ck_ito, but admission $v2_ck_adref granted $v2_ck_ato"
+      continue
+    fi
+
+    # dispatch: ack_due_epoch == dispatched_epoch + the assignment's ack_timeout_seconds.
+    v2_ck_de="$(v2_fm_get "$v2_ck_file" dispatched_epoch)"
+    v2_ck_ad="$(v2_fm_get "$v2_ck_file" ack_due_epoch)"
+    v2_ck_at="$(v2_fm_get "$v2_ck_ap" ack_timeout_seconds)"
+    if ! v2_sum_eq "$v2_ck_de" "$v2_ck_at" "$v2_ck_ad"; then
+      # A recovered receipt whose budget was computed from the PRE-CRASH epoch is the specific,
+      # informative version of this defect — and the one the design names by hand — so it reports as
+      # RECOVERY_EPOCH rather than as a generic arithmetic mismatch.
+      v2_ck_pc="$(v2_fm_get "$v2_ck_file" pre_crash_dispatched_epoch)"
+      if [ "$(v2_fm_get "$v2_ck_file" receipt_source)" = validated-uncommitted ] \
+         && [ -n "$v2_ck_pc" ] && v2_sum_eq "$v2_ck_pc" "$v2_ck_at" "$v2_ck_ad"; then
+        v2_fail RECOVERY_EPOCH "$v2_ck_name" "ack_due_epoch $v2_ck_ad was computed from pre_crash_dispatched_epoch $v2_ck_pc; a recovered receipt is re-stamped, and its ACK budget starts at the re-stamped dispatched_epoch $v2_ck_de"
+      else
+        v2_fail ACK_DUE "$v2_ck_name" "ack_due_epoch $v2_ck_ad != dispatched_epoch $v2_ck_de + assignment ack_timeout_seconds $v2_ck_at"
+      fi
+    fi
+  done <"$V2_SORTED"
+}
+
 v2_schema_ack()            { :; }   # Task 5
 v2_schema_result_capture() { :; }   # Task 6
 v2_schema_result()         { :; }   # Task 6

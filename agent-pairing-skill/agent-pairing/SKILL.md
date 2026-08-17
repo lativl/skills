@@ -224,9 +224,10 @@ it, and a recreate destroys uncommitted-residue evidence.
    For a `REMEDIATION` turn the base is the quarantined tip, and the turn is authorised only from a
    `REMEDIATION_REQUIRED` classification, or from `UNRECORDED_DRIFT` with a linked owner answer;
    its done-criteria must include restoring the accepted content append-only.
-2. **Write and commit the assignment** from `templates/assignment.md`. `scope` is a
-   **space-separated list of path prefixes**. Include goal, deliverable, the DON'Ts, and the
-   literal trailer block. If the commit fails, there is no dispatch — fail closed.
+2. **Write and commit the assignment** from `templates/assignment.md`, binding the exact
+   `admission_ref`. `scope` is a **space-separated list of path prefixes**. Include goal,
+   deliverable, the DON'Ts, and the literal trailer block. If the commit fails, there is no
+   dispatch — fail closed.
 3. **Write and commit the intent** from `templates/intent.md` with a fresh `idempotency_token`,
    unique across the whole topic. This commit strictly precedes dispatch, so "no intent" proves
    "never dispatched".
@@ -234,11 +235,50 @@ it, and a recreate destroys uncommitted-residue evidence.
    plus the idempotency token. Stateless transports get the full payload on every re-dispatch.
    Mechanics per transport: `RUNBOOK.md`.
 5. **Write and commit the dispatch receipt** from `templates/dispatch.md` with the real `job_id`,
-   the `intent_ref`, and `receipt_source: direct`.
-6. Gate: run `git -C <topic-dir> status --porcelain` — it **must be empty** — then
-   `scripts/validate.sh --check <topic-dir>`, and STOP on exit 2. Expect `OPEN (dispatched)`.
-   The cleanliness check is not decoration: `--check` reads `turns/` from the working tree, so an
-   uncommitted record classifies as if it were committed.
+   the `intent_ref`, the `admission_ref`, and `receipt_source: direct`. **Commit the receipt before
+   sending any wake notification.** The participant polls committed record `HEAD` for
+   `expected_dispatch_ref` and must never be told to look before there is something committed to
+   find.
+6. Gate: run `git -C <topic-dir> status --porcelain -- turns TOPIC.md` — it **must be empty** — then
+   `scripts/validate.sh --check <topic-dir>`, and STOP on exit 2. Expect `AWAITING_ACK`.
+
+### CYCLE — dispatch clocks
+
+v1 put ONE absolute deadline on the assignment, written *before* delivery latency was bounded at
+all. The motivating record shows what that buys: a receipt committed 7h42m20s **after** its own
+assignment deadline had already passed. v2 replaces it with two durations and two separate budgets.
+
+```text
+the COMMITTED RECEIPT starts the ACK budget          ack_due_epoch  = dispatched_epoch  + ack_timeout_seconds
+the CAPTURED ACK      starts the work budget         work_due_epoch = ack_captured_epoch + work_timeout_seconds
+the COMMITTED INTENT  starts the receipt bound        receipt_commit_by_epoch = intent.recorded_epoch + receipt_commit_timeout_seconds
+```
+
+Three rules follow, and the validator enforces all three from the records alone:
+
+- **Materialize every addend.** The assignment writes `ack_timeout_seconds` even though it defaults
+  from the admission, and the intent writes `receipt_commit_timeout_seconds` even though it must
+  equal the admitted value. A bound checkable only against a mutable default is not checkable at
+  replay time at all.
+- **Epochs are integers you stamp, and `recorded_at` beside them is display-only.** Epochs must not
+  decrease, but they MAY be equal — several records committed in one second are ordinary, and
+  `record_seq` breaks the tie.
+- **The validator has no clock.** It prints the stored due epochs; *you* compare them with your own
+  clock. A timeout that has passed is an observation and changes nothing until you commit a
+  `fence-initiated` record.
+
+If the receipt bound expires with no committed receipt, the participant writes nothing and exits.
+Replay then sees a committed intent with no receipt and classifies `DISPATCH_UNKNOWN`.
+
+**Recovering an uncommitted receipt.** A receipt found only in the working tree is **re-stamped, not
+restored**. Validate its exact tuple and required fields, then rewrite it with a fresh
+`dispatched_epoch` — the epoch at which you commit it now — recompute `ack_due_epoch` from that
+value, and carry the epoch from the original bytes as `pre_crash_dispatched_epoch`, which is evidence
+only and never enters arithmetic. Restoring the pre-crash epoch would publish an ACK budget that is
+already past at the moment the receipt first becomes visible, which is the v1 pre-expired-deadline
+defect rebuilt inside the recovery path. The ACK budget measures delivery latency, and the
+participant cannot observe an uncommitted receipt, so the budget starts when visibility starts. If
+the bytes do not validate, hash them into one owner question before removing them.
 
 You write yourself an assignment for your own turns too — reverts, remediation, applying a relayed
 patch. No commit exists without an assigned turn.
