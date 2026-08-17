@@ -9,9 +9,9 @@ turn_id: 0001
 attempt_id: 01
 turn_kind: NORMAL
 base_sha: 1111111111111111111111111111111111111111
-session_branch: pair/common-valid
-session_worktree: /private/tmp/agent-pairing-common-valid/work
-work_repo_common_dir: /private/tmp/agent-pairing-common-valid/work/.git
+session_branch: pair/fixture
+session_worktree: /private/tmp/agent-pairing-fixture/wt
+work_repo_common_dir: /private/tmp/agent-pairing-fixture/repo/.git
 scope: docs/
 agent_id: participant-a
 admission_ref: 0002-admission.md

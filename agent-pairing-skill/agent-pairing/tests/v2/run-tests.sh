@@ -15,6 +15,7 @@ V2_TMP="$(mktemp -d /tmp/agent-pairing-v2-tests.XXXXXX)" \
 [ -n "$V2_TMP" ] && [ -d "$V2_TMP" ] || { echo "FATAL: temp root allocation produced no directory" >&2; exit 3; }
 
 . "$HERE/lib.sh"
+. "$HERE/live.sh"
 trap 'v2_safe_rmdir "$V2_TMP" /tmp/agent-pairing-v2-tests.' EXIT
 
 V2_OUT="$V2_TMP/out"
@@ -26,7 +27,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version common admission clocks ack capture fence templates"
+V2_GROUPS="version common admission clocks ack capture fence classification render templates"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -228,10 +229,14 @@ if v2_group admission; then
   # All four (start mode, selection source) pairs are legal. The protocol constrains HOW the mode was
   # resolved, not which mode goes with which source: an owner can answer the selection question with
   # either mode, and either mode can be unambiguous in the initial prompt.
-  v2_expect_classification "primary-spawn from the initial prompt" admission/sel-spawn-prompt IDLE
-  v2_expect_classification "primary-spawn from an owner answer" admission/sel-spawn-answer IDLE
-  v2_expect_classification "owner-manual from the initial prompt" admission/sel-manual-prompt IDLE
-  v2_expect_classification "owner-manual from an owner answer" admission/sel-manual-answer IDLE
+  # These assert that the four pairs VALIDATE. The resulting classification is owned by the
+  # `classification` group, which builds real repositories: IDLE is not a property of the record text
+  # -- it additionally requires a registered, clean, stationary worktree, which a static fixture
+  # cannot have.
+  v2_expect_ok "primary-spawn from the initial prompt" admission/sel-spawn-prompt
+  v2_expect_ok "primary-spawn from an owner answer" admission/sel-spawn-answer
+  v2_expect_ok "owner-manual from the initial prompt" admission/sel-manual-prompt
+  v2_expect_ok "owner-manual from an owner answer" admission/sel-manual-answer
 
   # A topic with no admission has no participant, whatever its selection mode says. Selecting
   # owner-manual is NOT admission: the ACK and work budgets cannot start against nobody.
@@ -444,6 +449,96 @@ if v2_group fence; then
   # fabricated due_epoch classify FENCING at exit 0.
   v2_expect_only_violation "a fence cannot skip its due-epoch check by naming a missing receipt" \
     fence/fence-dangling-dispatch FENCE_DUE
+fi
+
+# --- classification: one valid fixture for every state in the design's table --------------------------
+# These build REAL repositories. The states below are not properties of the record text alone: they
+# depend on where the branch tip is, whether the worktree is registered and clean, and whether the
+# commits in range carry their attribution trailers. A fixture whose paths point nowhere would
+# exercise the "unavailable evidence" branch and prove nothing about any of them.
+if v2_group classification; then
+  v2_expect_classification "no admission: no participant yet" topic-empty-v2 AWAITING_PARTICIPANT
+  v2_expect_live "a completed turn on a clean stationary tree" idle IDLE
+  v2_expect_live "an assignment with no intent was never dispatched" never-dispatched "OPEN (never-dispatched)"
+  v2_expect_live "an intent with no receipt: delivery is unknown" dispatch-unknown DISPATCH_UNKNOWN
+  v2_expect_live "an acknowledged turn in progress" working WORKING
+  v2_expect_live "an unanswered owner question blocks everything" awaiting-owner AWAITING_OWNER
+  v2_expect_live "an actionable answer not yet materialized" owner-action-pending OWNER_ACTION_PENDING
+  v2_expect_live "a quarantined commit needs a remediation turn" remediation REMEDIATION_REQUIRED
+  v2_expect_live "an unexplained tip is drift, not remediation" drift UNRECORDED_DRIFT
+  v2_expect_live "uncommitted residue with no open attempt is drift" residue UNRECORDED_DRIFT
+  v2_expect_live "close postconditions incomplete" closing "CLOSING:close-0001"
+  v2_expect_live "every close postcondition satisfied" closed CLOSED
+
+  # An unanswered question about the OPEN ATTEMPT still blocks: precedence puts the owner ahead of
+  # every automatic action, so replay must not quietly continue the turn it asked about.
+  v2_expect_live "an unanswered question about the open attempt blocks it too" \
+    awaiting-owner-attempt AWAITING_OWNER
+fi
+
+# --- render: deterministic, committed-only, and never destructive -------------------------------------
+if v2_group render; then
+  v2_case_render() {
+    v2_t="$(v2_make_live idle)" || { v2_nok "render is byte-stable across runs" "cannot build live topic"; return; }
+
+    # --check must never modify the topic. A validator that writes while reporting cannot be run
+    # safely against a live record repository.
+    v2_before="$(git -C "$v2_t" status --porcelain)"
+    "$V2_VALIDATE" --check "$v2_t" >/dev/null 2>&1
+    if [ "$(git -C "$v2_t" status --porcelain)" = "$v2_before" ]; then
+      v2_ok "--check does not modify the topic"
+    else
+      v2_nok "--check does not modify the topic" "the working tree changed during --check"
+    fi
+
+    "$V2_VALIDATE" --render "$v2_t" >"$V2_OUT" 2>&1 \
+      || { v2_nok "render is byte-stable across runs" "first render failed: $(sed -n '1p' "$V2_OUT")"; return; }
+    cp "$v2_t/THREAD.md" "$V2_TMP/thread.first" || { v2_nok "render is byte-stable across runs" "cannot copy"; return; }
+    "$V2_VALIDATE" --render "$v2_t" >"$V2_OUT" 2>&1 \
+      || { v2_nok "render is byte-stable across runs" "second render failed"; return; }
+    if cmp -s "$V2_TMP/thread.first" "$v2_t/THREAD.md"; then
+      v2_ok "render is byte-stable across runs"
+    else
+      v2_nok "render is byte-stable across runs" "two consecutive renders differ"
+    fi
+
+    # Ordering is by record_seq, the ordering authority — not by timestamp, which is display-only and
+    # may repeat.
+    if [ "$(grep -c '^---8<---' "$v2_t/THREAD.md")" -ge 7 ]; then
+      v2_ok "every record appears in the rendered thread"
+    else
+      v2_nok "every record appears in the rendered thread" "only $(grep -c '^---8<---' "$v2_t/THREAD.md") sections"
+    fi
+
+    # A failed render must PRESERVE the previous THREAD.md rather than publish a truncated one.
+    cp "$v2_t/THREAD.md" "$V2_TMP/thread.good" || return
+    chmod a-w "$v2_t" 2>/dev/null
+    "$V2_VALIDATE" --render "$v2_t" >"$V2_OUT" 2>&1
+    v2_rc=$?
+    chmod u+w "$v2_t" 2>/dev/null
+    if [ "$v2_rc" -ne 0 ] && cmp -s "$V2_TMP/thread.good" "$v2_t/THREAD.md"; then
+      v2_ok "a failed render leaves the previous THREAD.md intact"
+    elif [ "$v2_rc" -eq 0 ]; then
+      v2_nok "a failed render leaves the previous THREAD.md intact" "the render unexpectedly succeeded on an unwritable topic"
+    else
+      v2_nok "a failed render leaves the previous THREAD.md intact" "THREAD.md was modified by a failed render"
+    fi
+  }
+  v2_case_render
+
+  # A report body containing record framing must be QUOTED in the thread, never parsed as control
+  # data — otherwise a participant's report could inject a record into the rendered history.
+  v2_case_render_quotes_artifacts() {
+    v2_n="rendered report bytes are quoted, not parsed as records"
+    v2_t="$(v2_materialize "$V2_FIXTURES/capture/framing-in-body")" || { v2_nok "$v2_n" "materialize failed"; return; }
+    "$V2_VALIDATE" --render "$v2_t" >"$V2_OUT" 2>&1 || { v2_nok "$v2_n" "render failed"; return; }
+    if grep -q '^> kind: result$' "$v2_t/THREAD.md" && ! grep -q '^kind: result$' "$v2_t/THREAD.md"; then
+      v2_ok "$v2_n"
+    else
+      v2_nok "$v2_n" "the artifact's framing was not quoted in THREAD.md"
+    fi
+  }
+  v2_case_render_quotes_artifacts
 fi
 
 # --- templates: the canonical bodies instantiate into a VALID topic ------------------------------------

@@ -117,6 +117,7 @@ V2_TOPIC_ID="$(v2_fm_get "$V2_TOPIC_BLOB" topic_id)"
 # How the participant was to be acquired, and where that choice came from. Written at OPEN, before
 # any admission exists, so replay can distinguish an inferred choice from an answered one.
 V2_START_MODE=""
+v2_require_topic_pins "$V2_TOPIC_BLOB" "$V2_TOPIC/TOPIC.md"
 v2_require_participant_selection "$V2_TOPIC_BLOB" "$V2_TOPIC/TOPIC.md"
 
 # --- residue -------------------------------------------------------------------------------------------
@@ -237,6 +238,7 @@ v2_check_acks
 v2_check_captures "$V2_TOPIC"
 v2_check_results
 v2_check_fences
+v2_check_topic_agreement
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
 
@@ -262,19 +264,72 @@ v2_print_due_epochs
 # Tasks 3-8 replace this with the full replay precedence. Until then only the no-attempt branch is
 # pinned: a topic with no admission has no participant, and one with an admission and nothing else is
 # idle.
-V2_ADMISSION_COUNT="$(v2_count_kind admission)"
-V2_OPEN="$(v2_open_attempt)"
+# The work-repo coordinates every live check reads. They come from the COMMITTED TOPIC.md, which is
+# the single source of the topic's identity — never from an assignment, because then "is this our
+# worktree?" would depend on which record you asked.
+V2_CDIR="$(v2_fm_get "$V2_TOPIC_BLOB" work_repo_common_dir)"
+V2_WT="$(v2_fm_get "$V2_TOPIC_BLOB" session_worktree)"
+V2_BRANCH="$(v2_fm_get "$V2_TOPIC_BLOB" session_branch)"
 
-if [ "$V2_ADMISSION_COUNT" -eq 0 ]; then
-  # No admission means no participant. Selecting owner-manual at OPEN is not admission: an ACK or
-  # work budget started here would be a clock running against nobody.
-  printf 'classification: AWAITING_PARTICIPANT\n'
-elif [ -n "$V2_OPEN" ]; then
-  printf 'classification: %s\n' "$(v2_classify_open_attempt $V2_OPEN)"
-else
-  # Task 8 replaces this with the full precedence: close boundary, owner questions, quarantine and
-  # drift all outrank a bare IDLE.
-  printf 'classification: IDLE\n'
+v2_emit_classification() {
+  if [ "$(v2_count_kind admission)" -eq 0 ] && [ "$(grep -c . "$V2_SORTED" || true)" -eq 0 ]; then
+    # No admission and no records at all: the topic is open but nobody has joined. Selecting
+    # owner-manual at OPEN is not admission — an ACK or work budget started here would be a clock
+    # running against nobody.
+    printf 'classification: AWAITING_PARTICIPANT\n'
+  else
+    v2_classify
+  fi
+}
+
+if [ "$V2_MODE" = --render ]; then
+  # --check NEVER modifies the topic; only --render writes, and it writes atomically.
+  #
+  # Every write is checked and the exit status is not assumed. An unchecked render publishes a
+  # TRUNCATED THREAD.md and reports success — a full disk or an unreadable record would replace a
+  # good rendering with a partial one and say nothing. On any failure the previous THREAD.md is left
+  # exactly as it was.
+  V2_TMPF="$V2_TOPIC/THREAD.md.tmp.$$"
+  v2_render_fail() { # <why>
+    case "$V2_TMPF" in "$V2_TOPIC"/THREAD.md.tmp.*) rm -f "$V2_TMPF" ;; esac
+    printf 'VIOLATION RENDER_FAILED %s: %s; previous THREAD.md left intact\n' "$V2_TOPIC" "$1" >&2
+    exit 2
+  }
+  V2_RENDER_RC=0
+  {
+    printf 'GENERATED — do not edit — regenerate with: validate.sh --render <topic-dir>\n' || V2_RENDER_RC=1
+    v2_render_out="$(v2_emit_classification)" || V2_RENDER_RC=1
+    printf '%s\n' "$v2_render_out" || V2_RENDER_RC=1
+    case "$v2_render_out" in *"classification: CLOSED"*) printf 'status: CLOSED\n' || V2_RENDER_RC=1 ;; esac
+    printf '\n' || V2_RENDER_RC=1
+    # Ordering is by record_seq — the ordering AUTHORITY — never by timestamp. `recorded_at` is
+    # display-only and two records may share an epoch, so a time-ordered render would not be stable.
+    while read -r v2_rn_seq v2_rn_kind v2_rn_name v2_rn_file; do
+      [ -n "${v2_rn_seq:-}" ] || continue
+      printf -- '---8<--- %s ---\n\n' "$v2_rn_name" || V2_RENDER_RC=1
+      cat "$v2_rn_file" || V2_RENDER_RC=1
+      printf '\n' || V2_RENDER_RC=1
+    done <"$V2_SORTED"
+    # Committed artifacts are QUOTED, never parsed. A report may contain `---`, front matter, or
+    # record framing; rendering it as control data would let a participant's report inject a record
+    # into the thread.
+    while read -r v2_rn_seq v2_rn_kind v2_rn_name v2_rn_file; do
+      [ -n "${v2_rn_seq:-}" ] || continue
+      [ "$v2_rn_kind" = result-capture ] || continue
+      v2_rn_art="$(v2_fm_get "$v2_rn_file" artifact_ref)"
+      v2_rn_blob="$(v2_stage_committed "$V2_TOPIC" "$v2_rn_art")" || { V2_RENDER_RC=1; continue; }
+      printf -- '---8<--- %s (quoted report bytes) ---\n\n' "$v2_rn_art" || V2_RENDER_RC=1
+      sed 's/^/> /' "$v2_rn_blob" || V2_RENDER_RC=1
+      printf '\n' || V2_RENDER_RC=1
+    done <"$V2_SORTED"
+  } >"$V2_TMPF" || V2_RENDER_RC=1
+  # `{ ... }` is a group, not a subshell, so V2_RENDER_RC survives the redirection.
+  [ "$V2_RENDER_RC" -eq 0 ] \
+    || v2_render_fail "render group failed (unwritable temp path or unreadable record)"
+  # Same directory as THREAD.md, so this is a same-filesystem rename.
+  mv "$V2_TMPF" "$V2_TOPIC/THREAD.md" || v2_render_fail "atomic rename failed"
+  exit 0
 fi
 
+v2_emit_classification
 exit 0

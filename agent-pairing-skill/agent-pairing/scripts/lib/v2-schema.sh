@@ -153,6 +153,23 @@ v2_validate_kind() { # <staged-file> <display-name>
 V2_START_MODES="primary-spawn owner-manual"
 V2_SELECTION_SOURCES="initial-prompt owner-answer"
 
+# TOPIC.md pins the base and the work-repo coordinates at OPEN, before any record exists. These are
+# not optional: `base_sha` is the accepted-SHA SEED, so without it the fold starts from nothing and
+# every later comparison against a branch tip is meaningless — the topic would classify as drift for
+# the wrong reason instead of being rejected for the right one.
+V2_TOPIC_KEYS="base_sha base_ref session_branch session_worktree work_repo_common_dir"
+
+v2_require_topic_pins() { # <staged TOPIC.md> <subject>
+  v2_tp_f="$1" v2_tp_n="$2"
+  for v2_tp_k in $V2_TOPIC_KEYS; do
+    [ -n "$(v2_fm_get "$v2_tp_f" "$v2_tp_k")" ] \
+      || v2_fail TOPIC_MISSING_KEY "$v2_tp_n" "TOPIC.md does not pin $v2_tp_k"
+  done
+  v2_tp_base="$(v2_fm_get "$v2_tp_f" base_sha)"
+  [ -z "$v2_tp_base" ] || v2_is_sha "$v2_tp_base" \
+    || v2_fail BAD_SHA "$v2_tp_n" "base_sha is not a 40-character hex SHA"
+}
+
 v2_require_participant_selection() { # <staged TOPIC.md> <subject>
   v2_ps_f="$1" v2_ps_n="$2"
   v2_ps_mode="$(v2_fm_get "$v2_ps_f" participant_start_mode)"
@@ -378,6 +395,27 @@ v2_ref_target_already_faulted() { # <ref-basename>
   v2_rt_ref="$1"
   v2_ref_committed "$v2_rt_ref" || return 1
   [ -z "$(v2_ref_validated_kind "$v2_rt_ref")" ]
+}
+
+# Every assignment must agree with TOPIC.md about WHERE the work happens and what the base was.
+# TOPIC.md is the single identity source; if an assignment could disagree, then "is this our
+# worktree?" would depend on which record you asked, and a later assignment could quietly relocate
+# the topic onto a different branch or repository.
+v2_check_topic_agreement() {
+  v2_ta_first=""
+  for v2_ta_f in $(v2_files_of_kind assignment); do
+    for v2_ta_k in session_branch session_worktree work_repo_common_dir; do
+      [ "$(v2_fm_get "$v2_ta_f" "$v2_ta_k")" = "$(v2_fm_get "$V2_TOPIC_BLOB" "$v2_ta_k")" ] \
+        || v2_fail TOPIC_MISMATCH "$(v2_fm_get "$v2_ta_f" record_seq)" "$v2_ta_k disagrees with TOPIC.md"
+    done
+    [ -n "$v2_ta_first" ] || v2_ta_first="$v2_ta_f"
+  done
+  # The base is pinned BEFORE any assignment exists, so the FIRST assignment is validated against
+  # TOPIC.md — never the other way round. The seed cannot be validated by the thing it seeds.
+  if [ -n "$v2_ta_first" ]; then
+    [ "$(v2_fm_get "$v2_ta_first" base_sha)" = "$(v2_fm_get "$V2_TOPIC_BLOB" base_sha)" ] \
+      || v2_fail TOPIC_BASE_MISMATCH "$(v2_fm_get "$v2_ta_first" record_seq)" "the first assignment's base_sha is not TOPIC.md's pinned base"
+  fi
 }
 
 v2_schema_assignment() { # <staged-file> <display-name>
