@@ -194,21 +194,37 @@ Three recurring causes are worth naming, because they produced most of the rest:
 
 ## Fresh-session discovery
 
-To be recorded after starting one new Claude session and one new Codex session, using these exact
-prompts:
+Both prompts run in fresh non-interactive sessions against the **installed** packages, with tools
+disabled so the answers come from the manuals rather than from reading the repository.
 
-```text
-Use agent-pairing. I will pair the secondary manually by topic ID. Explain only how participant
-selection is resolved before OPEN.
-```
+### Primary
 
-```text
-Use pair-with-primary. Explain only whether you read an uncommitted dispatch receipt or update Git
-notes.
-```
+> Use agent-pairing. I will pair the secondary manually by topic ID. Explain only how participant
+> selection is resolved before OPEN.
 
-Expected: the first selects `owner-manual` without asking; the second says committed receipt only,
-and no Git notes.
+**PASS.** Selected `owner-manual` without asking, and stated the whole owner-manual contract
+unprompted: return the topic ID, the absolute record path, and the literal join prompt, then stop;
+create no assignment, intent, or ACK budget because there is no participant to bind them to; the
+topic sits at `AWAITING_PARTICIPANT` until the admission commits, which is what moves it to `IDLE`.
+
+**This check earned its place.** On the first run the primary answered correctly in every respect
+*except* that it recorded `participant_selection_source: owner-answer`, reasoning that the owner had
+told it the mode. Every request comes from the owner, so "the owner told me" does not distinguish the
+two cases — the field records **whether you had to ask**. The manual was ambiguous, not the agent.
+Clarified, redeployed, and re-run: the second run selects `initial-prompt` and states the test
+explicitly ("records only whether I had to ask").
+
+A validator fixture could not have caught this. Both values are legal scalars and both produce a
+valid topic; only an agent reading the manual and choosing could expose it.
+
+### Participant
+
+> Use pair-with-primary. Explain only whether you read an uncommitted dispatch receipt or update Git
+> notes.
+
+**PASS.** "I read committed dispatch receipts only — never the uncommitted working tree — and I never
+write or update Git notes; the primary is the record's sole writer." Both v1 defects named and
+refused, unprompted.
 
 ## Backup
 
