@@ -1793,7 +1793,13 @@ fi
 d="$TMPROOT/templated"; mkdir -p "$d/turns"
 # TOPIC.md is instantiated too — Task 1's gate requires it, and its base_sha must equal the first
 # assignment's (TOPIC_BASE_MISMATCH) and its identity keys every assignment's (TOPIC_MISMATCH).
+# PLAN DEVIATION (protocol-v2 Task 3): templates/ is SHARED, not frozen with the v1 validator, so
+# this instantiation must cover every token the template carries. Task 3 adds the two participant-
+# selection tokens; without these two lines the placeholder scan below reports a surviving `{{` and
+# the frozen 360/0 gate turns red for a template change it does not otherwise care about.
 sed -e 's/{{TOPIC_ID}}/templated/' \
+    -e 's/{{PARTICIPANT_START_MODE}}/owner-manual/' \
+    -e 's/{{PARTICIPANT_SELECTION_SOURCE}}/initial-prompt/' \
     -e 's/{{BASE_SHA}}/1111111111111111111111111111111111111111/' \
     -e 's|{{BASE_REF}}|origin/dev|' \
     -e 's|{{SESSION_BRANCH}}|pair/templated|' -e 's|{{SESSION_WORKTREE}}|/tmp/wt/templated|' \

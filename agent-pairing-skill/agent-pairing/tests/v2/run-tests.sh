@@ -26,7 +26,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version common"
+V2_GROUPS="version common admission"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -128,6 +128,41 @@ if v2_group common; then
     v2_nok "an uncommitted record set yields no classification" \
       "the validator produced a classification from working-tree bytes"
   fi
+fi
+
+# --- admission: participant selection and the transport contract -------------------------------------
+if v2_group admission; then
+  # All four (start mode, selection source) pairs are legal. The protocol constrains HOW the mode was
+  # resolved, not which mode goes with which source: an owner can answer the selection question with
+  # either mode, and either mode can be unambiguous in the initial prompt.
+  v2_expect_classification "primary-spawn from the initial prompt" admission/sel-spawn-prompt IDLE
+  v2_expect_classification "primary-spawn from an owner answer" admission/sel-spawn-answer IDLE
+  v2_expect_classification "owner-manual from the initial prompt" admission/sel-manual-prompt IDLE
+  v2_expect_classification "owner-manual from an owner answer" admission/sel-manual-answer IDLE
+
+  # A topic with no admission has no participant, whatever its selection mode says. Selecting
+  # owner-manual is NOT admission: the ACK and work budgets cannot start against nobody.
+  v2_expect_classification "selecting owner-manual is not itself admission" \
+    topic-empty-v2 AWAITING_PARTICIPANT
+
+  v2_expect_only_violation "selection source is an enumeration" \
+    admission/bad-selection-source PARTICIPANT_SELECTION
+  v2_expect_only_violation "the start mode is required" \
+    admission/missing-start-mode PARTICIPANT_START_MODE
+  v2_expect_only_violation "join_mode agrees with the topic's start mode" \
+    admission/join-mode-mismatch JOIN_MODE
+  v2_expect_only_violation "admission_id is unique" \
+    admission/duplicate-admission-id ADMISSION_ID_DUP
+  v2_expect_only_violation "a monitor handle is not a durable address" \
+    admission/monitor-as-address DURABLE_ADDRESS_KIND
+  v2_expect_only_violation "searchable requires a token-search recipe" \
+    admission/searchable-without-recipe SEARCHABILITY
+  v2_expect_only_violation "unsearchable forbids a token-search recipe" \
+    admission/unsearchable-with-recipe SEARCHABILITY
+  v2_expect_only_violation "commits requires a visible worktree" \
+    admission/commits-invisible CAPABILITY_VISIBILITY
+  v2_expect_only_violation "a changed transport contract needs a new admission_id" \
+    admission/admission-mutated ADMISSION_MUTATED
 fi
 
 printf '\n%s passed, %s failed\n' "$V2_PASS" "$V2_FAIL"

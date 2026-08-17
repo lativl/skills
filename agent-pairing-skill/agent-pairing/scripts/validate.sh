@@ -98,6 +98,11 @@ esac
 V2_TOPIC_ID="$(v2_fm_get "$V2_TOPIC_BLOB" topic_id)"
 [ -n "$V2_TOPIC_ID" ] || v2_violation TOPIC_ID "$V2_TOPIC" "TOPIC.md declares no topic_id"
 
+# How the participant was to be acquired, and where that choice came from. Written at OPEN, before
+# any admission exists, so replay can distinguish an inferred choice from an answered one.
+V2_START_MODE=""
+v2_require_participant_selection "$V2_TOPIC_BLOB" "$V2_TOPIC/TOPIC.md"
+
 # --- residue -------------------------------------------------------------------------------------------
 # Reported BEFORE any classification. Record bytes that exist only in the working tree are not
 # records, but they are evidence of an interrupted write, and a topic carrying them has no
@@ -205,6 +210,8 @@ while read -r v2_seq v2_kind v2_name v2_staged; do
   v2_prev_epoch="$v2_epoch"
   v2_prev_name="$v2_name"
 done <"$V2_SORTED"
+
+v2_check_admissions "$V2_SORTED"
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
 

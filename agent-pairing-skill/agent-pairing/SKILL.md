@@ -100,6 +100,44 @@ it (or resolve it by kind — **RESUME** step 0) before acting.
 
 ## OPEN — opening a topic
 
+### Step 0 — resolve how the participant will join
+
+Before anything else, decide `participant_start_mode` and record where that decision came from.
+Read the request for **meaning**, not keywords:
+
+```text
+If the initial request unambiguously says to spawn, select primary-spawn and do not ask.
+If it unambiguously says the owner will pair by topic ID, select owner-manual and do not ask.
+Otherwise ask exactly once: "How should the secondary agent join this topic: should I spawn it, or will you pair it manually using the topic ID?"
+```
+
+`participant_selection_source` is `initial-prompt` when the request settled it and `owner-answer`
+when you had to ask. Ask **once**: a second question about the same choice is a stall, and a
+question asked when the request already answered it is noise. Both values go into `TOPIC.md` at
+step 4 and are never edited afterwards.
+
+**`owner-manual`** — after the topic is committed, return exactly three things to the owner: the
+topic ID, the absolute record path, and the exact join prompt
+
+```text
+pair with primary on TOPIC_ID
+```
+
+Then STOP. Selecting `owner-manual` is **not** admission. Create no assignment, no intent, no ACK
+budget and no work budget: there is nobody for them to bind to, and a clock started against nobody
+expires against nobody. The topic classifies `AWAITING_PARTICIPANT` until the owner confirms the
+participant joined and supplies the durable address the admission needs. Only then commit the
+admission record, after which the topic classifies `IDLE`.
+
+**`primary-spawn`** — spawn the participant through an approved transport and obtain a **durable**
+session or job address before committing the admission. A monitor, waiter, or foreground polling
+handle is never a durable address: it names the watcher, not the job, so after a crash it finds
+nothing — which is exactly when the address is needed. If the spawn fails, stop and ask the owner
+for direction; never silently fall back to `owner-manual`, because the two modes produce different
+admission evidence and the record would then describe a pairing that did not happen.
+
+### Steps 1-10 — creating the topic
+
 1. Get from the caller, explicitly: the work repo path, the **base ref** (e.g. `origin/dev` — never
    guessed), and the topic slug. Stop and ask if any is missing.
 2. Refuse to open if the topic dir, the branch `pair/<slug>`, or the worktree path already exists.
@@ -117,10 +155,11 @@ it (or resolve it by kind — **RESUME** step 0) before acting.
    ```
 
    Then write `TOPIC.md` from `templates/TOPIC.md` and fill every front-matter key **except**
-   `session_worktree` and `work_repo_common_dir` — `topic_id`, `base_sha`, `base_ref`,
-   `session_branch`. `base_sha` is the pinned commit; `base_ref` is the explicit ref it was cut
-   from. The validator seeds the accepted SHA from `base_sha` and presence-checks `base_ref`; a
-   topic missing either is rejected before any record is read.
+   `session_worktree` and `work_repo_common_dir` — `protocol_version` (the exact scalar `2`),
+   `topic_id`, `participant_start_mode` and `participant_selection_source` from step 0, `base_sha`,
+   `base_ref`, `session_branch`. `base_sha` is the pinned commit; `base_ref` is the explicit ref it
+   was cut from. The validator seeds the accepted SHA from `base_sha` and presence-checks
+   `base_ref`; a topic missing either is rejected before any record is read.
 
    The two path keys are filled in step 8 from the worktree itself, which does not exist yet.
    **Never guess them:** the canonical values are realpaths (`/private/tmp/…`, not `/tmp/…`, on
@@ -150,7 +189,24 @@ it (or resolve it by kind — **RESUME** step 0) before acting.
 9. Commit the record repo. **The topic exists only when this commit exists.**
 10. Gate: run `git -C <topic-dir> status --porcelain` — it **must be empty** — then
     `scripts/validate.sh --check <topic-dir>`, and STOP on exit 2. A freshly opened topic
-    classifies `IDLE`.
+    classifies `AWAITING_PARTICIPANT`: it has a charter and a pinned base, but no admitted
+    participant yet.
+
+### Step 11 — admit the participant
+
+Write `templates/admission.md`, fill every field from the transport you actually used, and commit
+it. The admission is the only durable proof that a participant exists, and every later assignment
+binds one exact `admission_ref`.
+
+The fields are validated, not documentation. `capability: commits` requires
+`worktree_visible: true`; `searchability: searchable` requires a real token-search recipe in
+`RUNBOOK.md` and a non-null `token_search_recipe_ref`, while `unsearchable` requires the literal
+`null` and means replay goes straight to one owner question instead of pretending a search happened.
+`durable_address` never contains a credential. Any later change to transport, address, capability,
+visibility, searchability, report channel, or evidence class is a **new admission record with a new
+`admission_id`** — editing one in place would retroactively change what past assignments agreed to.
+
+After the admission commits, re-run the gate. The topic now classifies `IDLE` and a turn may begin.
 
 The worktree is protection against *accidental* interference — git refuses to check out its branch
 twice, and another session's branch switching cannot move this HEAD. It is not a security boundary:

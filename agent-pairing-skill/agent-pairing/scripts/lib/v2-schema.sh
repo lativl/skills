@@ -145,7 +145,153 @@ v2_validate_kind() { # <staged-file> <display-name>
   esac
 }
 
-v2_schema_admission()      { :; }   # Task 3
+# --- topic-level participant selection -----------------------------------------------------------------
+# Resolved at OPEN, before any admission exists. The pair is not constrained: an owner may answer the
+# selection question with either mode, and either mode may be unambiguous in the opening request.
+# What IS constrained is that both values exist and are drawn from their enumerations, so replay can
+# tell an inferred choice from an answered one instead of guessing which happened.
+V2_START_MODES="primary-spawn owner-manual"
+V2_SELECTION_SOURCES="initial-prompt owner-answer"
+
+v2_require_participant_selection() { # <staged TOPIC.md> <subject>
+  v2_ps_f="$1" v2_ps_n="$2"
+  v2_ps_mode="$(v2_fm_get "$v2_ps_f" participant_start_mode)"
+  v2_ps_src="$(v2_fm_get "$v2_ps_f" participant_selection_source)"
+  if [ -z "$v2_ps_mode" ]; then
+    v2_fail PARTICIPANT_START_MODE "$v2_ps_n" "TOPIC.md declares no participant_start_mode"
+  elif ! v2_in_list "$v2_ps_mode" "$V2_START_MODES"; then
+    v2_fail PARTICIPANT_START_MODE "$v2_ps_n" "participant_start_mode=$v2_ps_mode is not one of: $V2_START_MODES"
+  fi
+  if [ -z "$v2_ps_src" ]; then
+    v2_fail PARTICIPANT_SELECTION "$v2_ps_n" "TOPIC.md declares no participant_selection_source"
+  elif ! v2_in_list "$v2_ps_src" "$V2_SELECTION_SOURCES"; then
+    v2_fail PARTICIPANT_SELECTION "$v2_ps_n" "participant_selection_source=$v2_ps_src is not one of: $V2_SELECTION_SOURCES"
+  fi
+  V2_START_MODE="$v2_ps_mode"
+}
+
+# --- admission ---------------------------------------------------------------------------------------------
+V2_CAPABILITIES="commits writes-repo-only read-only"
+V2_ADDRESS_KINDS="session-id job-id human-relay"
+V2_SEARCHABILITIES="searchable unsearchable"
+V2_REPORT_CHANNELS="transport-output human-relay"
+V2_ACK_EVIDENCE_CLASSES="transport-attested human-relayed"
+V2_ADMISSION_KEYS="admission_id agent_id join_mode transport capability worktree_visible \
+durable_address_kind durable_address searchability token_search_recipe_ref report_channel \
+ack_evidence_class receipt_commit_timeout_seconds default_ack_timeout_seconds"
+# The fields that make up the transport CONTRACT. Any change to one of these is a different contract
+# and requires a new admission_id — an assignment binds one exact admission_ref, so silently editing
+# the contract under a stable id would retroactively change what past assignments agreed to.
+V2_ADMISSION_CONTRACT_KEYS="transport capability worktree_visible durable_address_kind \
+durable_address searchability token_search_recipe_ref report_channel ack_evidence_class"
+
+v2_schema_admission() { # <staged-file> <display-name>
+  v2_ad_f="$1" v2_ad_n="$2"
+  for v2_ad_k in $V2_ADMISSION_KEYS; do
+    v2_fm_has "$v2_ad_f" "$v2_ad_k" || { v2_fail MISSING_KEY "$v2_ad_n" "missing $v2_ad_k"; return 1; }
+  done
+
+  v2_ad_join="$(v2_fm_get "$v2_ad_f" join_mode)"
+  if ! v2_in_list "$v2_ad_join" "$V2_START_MODES"; then
+    v2_fail JOIN_MODE "$v2_ad_n" "join_mode=$v2_ad_join is not one of: $V2_START_MODES"
+  elif [ -n "${V2_START_MODE:-}" ] && [ "$v2_ad_join" != "$V2_START_MODE" ]; then
+    # How the participant ARRIVED must match how the topic said it would. A mismatch means either the
+    # record or the topic is describing a different pairing than the one that happened.
+    v2_fail JOIN_MODE "$v2_ad_n" "join_mode=$v2_ad_join contradicts the topic's participant_start_mode=$V2_START_MODE"
+  fi
+
+  v2_ad_cap="$(v2_fm_get "$v2_ad_f" capability)"
+  v2_in_list "$v2_ad_cap" "$V2_CAPABILITIES" \
+    || v2_fail CAPABILITY "$v2_ad_n" "capability=$v2_ad_cap is not one of: $V2_CAPABILITIES"
+
+  v2_ad_vis="$(v2_fm_get "$v2_ad_f" worktree_visible)"
+  case "$v2_ad_vis" in
+    true|false) ;;
+    *) v2_fail WORKTREE_VISIBLE "$v2_ad_n" "worktree_visible=$v2_ad_vis is not true or false" ;;
+  esac
+
+  # `commits` is the ONLY capability that admits a participant-authored landed commit, and a
+  # participant that cannot see the worktree cannot have authored one in it. This is checked at
+  # admission, again at assignment binding, and again at ACK, so an illegal capability cannot arrive
+  # later disguised as unexplained drift.
+  if [ "$v2_ad_cap" = commits ] && [ "$v2_ad_vis" = false ]; then
+    v2_fail CAPABILITY_VISIBILITY "$v2_ad_n" "capability: commits requires worktree_visible: true"
+  fi
+
+  v2_ad_akind="$(v2_fm_get "$v2_ad_f" durable_address_kind)"
+  # A monitor, waiter, or foreground polling handle names a WATCHER, not the job. After a crash the
+  # watcher is gone and the handle finds nothing, which is precisely when a durable address is needed.
+  v2_in_list "$v2_ad_akind" "$V2_ADDRESS_KINDS" \
+    || v2_fail DURABLE_ADDRESS_KIND "$v2_ad_n" "durable_address_kind=$v2_ad_akind is not one of: $V2_ADDRESS_KINDS (a monitor or waiter handle is never durable)"
+  [ -n "$(v2_fm_get "$v2_ad_f" durable_address)" ] \
+    || v2_fail DURABLE_ADDRESS "$v2_ad_n" "durable_address is empty"
+
+  v2_ad_search="$(v2_fm_get "$v2_ad_f" searchability)"
+  v2_ad_recipe="$(v2_fm_get "$v2_ad_f" token_search_recipe_ref)"
+  case "$v2_ad_search" in
+    searchable)
+      [ "$v2_ad_recipe" != null ] && [ -n "$v2_ad_recipe" ] \
+        || v2_fail SEARCHABILITY "$v2_ad_n" "searchability: searchable requires a non-null token_search_recipe_ref" ;;
+    unsearchable)
+      # A null recipe is the honest encoding: replay SKIPS token search and goes to one owner
+      # question, rather than recording that a search happened when none could.
+      [ "$v2_ad_recipe" = null ] \
+        || v2_fail SEARCHABILITY "$v2_ad_n" "searchability: unsearchable requires token_search_recipe_ref: null (got $v2_ad_recipe)" ;;
+    *)
+      v2_fail SEARCHABILITY "$v2_ad_n" "searchability=$v2_ad_search is not one of: $V2_SEARCHABILITIES" ;;
+  esac
+
+  v2_ad_chan="$(v2_fm_get "$v2_ad_f" report_channel)"
+  v2_in_list "$v2_ad_chan" "$V2_REPORT_CHANNELS" \
+    || v2_fail REPORT_CHANNEL "$v2_ad_n" "report_channel=$v2_ad_chan is not one of: $V2_REPORT_CHANNELS"
+
+  v2_ad_cls="$(v2_fm_get "$v2_ad_f" ack_evidence_class)"
+  v2_in_list "$v2_ad_cls" "$V2_ACK_EVIDENCE_CLASSES" \
+    || v2_fail ACK_EVIDENCE_CLASS "$v2_ad_n" "ack_evidence_class=$v2_ad_cls is not one of: $V2_ACK_EVIDENCE_CLASSES"
+
+  for v2_ad_k in receipt_commit_timeout_seconds default_ack_timeout_seconds; do
+    v2_ad_v="$(v2_fm_get "$v2_ad_f" "$v2_ad_k")"
+    if ! v2_is_uint "$v2_ad_v" || [ "$v2_ad_v" -eq 0 ]; then
+      v2_fail ADMISSION_TIMEOUT "$v2_ad_n" "$v2_ad_k='$v2_ad_v' is not a positive decimal integer"
+    fi
+  done
+}
+# Cross-record admission rules. Run after every admission has passed its own schema, over the
+# ordered record index.
+#
+# An `admission_id` names ONE transport contract. Two records may not share it:
+#   - sharing it with DIFFERENT contract fields silently rewrites what past assignments agreed to,
+#     because an assignment binds one exact admission_ref and the id is how it is named;
+#   - sharing it with IDENTICAL fields is a redundant record whose only effect is to make the id
+#     ambiguous as a reference.
+# The two get different codes because they are different mistakes: the first is a contract change
+# that skipped its new id, the second is a duplicate.
+v2_check_admissions() { # <ordered record index>
+  v2_ca_idx="$1"
+  v2_ca_list="$V2_WORK/admissions"
+  awk '$2 == "admission" { print $3 " " $4 }' "$v2_ca_idx" >"$v2_ca_list" || return 1
+  while read -r v2_ca_name v2_ca_file; do
+    [ -n "${v2_ca_name:-}" ] || continue
+    v2_ca_id="$(v2_fm_get "$v2_ca_file" admission_id)"
+    while read -r v2_ca_name2 v2_ca_file2; do
+      [ -n "${v2_ca_name2:-}" ] || continue
+      # Ordered index, so comparing only forward pairs reports each collision once.
+      [ "$v2_ca_name2" \> "$v2_ca_name" ] || continue
+      [ "$(v2_fm_get "$v2_ca_file2" admission_id)" = "$v2_ca_id" ] || continue
+      v2_ca_changed=""
+      for v2_ca_k in $V2_ADMISSION_CONTRACT_KEYS; do
+        [ "$(v2_fm_get "$v2_ca_file" "$v2_ca_k")" = "$(v2_fm_get "$v2_ca_file2" "$v2_ca_k")" ] \
+          || v2_ca_changed="$v2_ca_changed $v2_ca_k"
+      done
+      if [ -n "$v2_ca_changed" ]; then
+        v2_fail ADMISSION_MUTATED "$v2_ca_name2" "changes${v2_ca_changed} but reuses admission_id $v2_ca_id from $v2_ca_name; a changed transport contract needs a new admission_id"
+      else
+        v2_fail ADMISSION_ID_DUP "$v2_ca_name2" "admission_id $v2_ca_id is already used by $v2_ca_name"
+      fi
+    done <"$v2_ca_list"
+  done <"$v2_ca_list"
+}
+
 v2_schema_assignment()     { :; }   # Task 4
 v2_schema_intent()         { :; }   # Task 4
 v2_schema_dispatch()       { :; }   # Task 4

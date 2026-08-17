@@ -44,13 +44,59 @@ record repo in `/tmp` for convenience.
 
 ---
 
-## Transports
+## Transport admission
 
-The registry in `TOPIC.md` names, per agent: `agent_id`, transport, capability class
-(`commits` | `writes-repo-only` | `read-only`), and whether the session worktree path is visible to
-that agent. Get the capability class right at open — an agent that cannot see the worktree needs
-the relay path from the first turn, and one participant crossing classes mid-session has already
-happened.
+Under protocol v2 the transport contract is a **committed record**, not a registry note. Before any
+assignment exists, commit `templates/admission.md` describing the transport you actually used. Every
+assignment then binds one exact `admission_ref`, and the validator re-checks the capability and
+visibility rules at assignment binding and again at ACK — so an illegal transition fails closed
+instead of surfacing three turns later as unexplained drift.
+
+The `TOPIC.md` Registry section stays as human-readable context, but it is no longer the authority:
+if the registry and the admission disagree, the admission is what the protocol enforces.
+
+Fill each admission field from the table below. Every one of them is validated:
+
+| Field | What it must say |
+| --- | --- |
+| `join_mode` | `primary-spawn` or `owner-manual` — and it must match `TOPIC.md`'s `participant_start_mode` |
+| `capability` | `commits`, `writes-repo-only`, or `read-only` |
+| `worktree_visible` | `true` or `false`; `commits` requires `true` |
+| `durable_address_kind` | `session-id`, `job-id`, or `human-relay` — never a monitor or waiter handle |
+| `durable_address` | the address itself, never a credential |
+| `searchability` | `searchable` (with a recipe below) or `unsearchable` (with `token_search_recipe_ref: null`) |
+| `report_channel` | `transport-output` or `human-relay` |
+| `ack_evidence_class` | `transport-attested` or `human-relayed` |
+| `receipt_commit_timeout_seconds` | positive integer — how long the participant waits for the committed receipt |
+| `default_ack_timeout_seconds` | positive integer — the default each assignment materializes explicitly |
+
+**A monitor ID is inadmissible.** A watcher handle, a foreground poll loop, a wrapper PID: none of
+these is a durable address. They name the thing observing the job, so they stop resolving at exactly
+the moment the address is needed — after a crash, when replay has to find the job again.
+
+**Capability is a permission rule, not a physical claim.** `read-only` forbids a landed commit,
+worktree modifications, and a relay `patch.diff` by contract; it is not an assertion that emitting
+patch bytes requires filesystem writes. `writes-repo-only` admits visible uncommitted changes or an
+invisible relay patch, but never a participant-authored `result_sha` — when the primary applies a
+verified relay patch, the resulting `result_sha` names the primary's own application commit and
+keeps the existing `On-behalf-of` / `Applied-by: primary` provenance.
+
+Get the capability class right at open — an agent that cannot see the worktree needs the relay path
+from the first turn, and one participant crossing classes mid-session has already happened. Crossing
+classes now requires a new admission record with a new `admission_id`.
+
+### Per-transport admission values
+
+| Transport | address kind | searchability | report channel | evidence class | visibility | capability |
+| --- | --- | --- | --- | --- | --- | --- |
+| In-runtime subagent | `session-id` | `unsearchable` | `transport-output` | `transport-attested` | `true` | `commits` |
+| codex CLI | `job-id` | `searchable` (see below) | `transport-output` | `transport-attested` | `true` | `commits` |
+| Owner-relayed agent | `human-relay` | `unsearchable` | `human-relay` | `human-relayed` | `false` | `writes-repo-only` or `read-only` |
+
+`searchable` for the codex CLI means the recipe in *Finding a lost job* below is real and runnable.
+If it is not runnable in your environment, declare `unsearchable` with `token_search_recipe_ref:
+null` — an honest `unsearchable` sends replay to one owner question, while a `searchable` claim with
+no recipe records a search that never happened.
 
 ### In-runtime subagents (same machine, same filesystem)
 
