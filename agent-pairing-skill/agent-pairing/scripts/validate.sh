@@ -71,6 +71,21 @@ V2_WORK="$(mktemp -d /tmp/agent-pairing-v2.XXXXXX)" \
 # --- the record repository -----------------------------------------------------------------------------
 v2_git "$V2_TOPIC" rev-parse --git-dir >/dev/null 2>&1 \
   || v2_violation RECORD_REPO "$V2_TOPIC" "not a Git record repository; v2 reads records only from committed objects"
+
+# The topic directory must be the repository ROOT, not merely inside one. `rev-parse --git-dir`
+# walks upward, so a directory of loose record files sitting anywhere under some other repository
+# would be accepted and every `HEAD:` read would resolve against THAT repository's tree — the
+# validator would classify a different topic's records as this one's, while the residue check looked
+# at these paths. The two reads would not even describe the same tree.
+V2_TOPLEVEL="$(v2_git "$V2_TOPIC" rev-parse --show-toplevel 2>/dev/null)" \
+  || v2_violation RECORD_REPO "$V2_TOPIC" "cannot resolve the record repository root"
+V2_TOPIC_REAL="$(cd "$V2_TOPIC" 2>/dev/null && pwd -P)" \
+  || v2_fatal "$V2_TOPIC: cannot resolve the topic directory"
+V2_TOPLEVEL_REAL="$(cd "$V2_TOPLEVEL" 2>/dev/null && pwd -P)" \
+  || v2_fatal "$V2_TOPLEVEL: cannot resolve the record repository root"
+[ "$V2_TOPIC_REAL" = "$V2_TOPLEVEL_REAL" ] \
+  || v2_violation RECORD_REPO "$V2_TOPIC" "is not its own record repository; it sits inside $V2_TOPLEVEL_REAL, whose committed objects are not this topic's"
+
 v2_git "$V2_TOPIC" rev-parse --verify HEAD >/dev/null 2>&1 \
   || v2_violation RECORD_REPO "$V2_TOPIC" "record repository has no commit at HEAD"
 
@@ -110,8 +125,10 @@ v2_require_participant_selection "$V2_TOPIC_BLOB" "$V2_TOPIC/TOPIC.md"
 v2_check_uncommitted_residue "$V2_TOPIC"
 
 # --- records --------------------------------------------------------------------------------------------
-V2_RECORDS="$(v2_list_records "$V2_TOPIC")" \
+v2_list_records "$V2_TOPIC" \
   || v2_fatal "$V2_TOPIC: cannot enumerate committed records under turns/: $(v2_git_err)"
+[ "$V2_RECORD_NEWLINE" = no ] \
+  || v2_violation RECORD_PATH "$V2_TOPIC" "a committed record path contains a newline; record files are named SSSS-....md"
 
 # One line per record: `record_seq kind basename staged-path`. A file, not a shell string, because
 # every later stage reads it with `while read < file` — a pipe would run the loop in a subshell and
@@ -119,21 +136,26 @@ V2_RECORDS="$(v2_list_records "$V2_TOPIC")" \
 V2_TSV="$V2_WORK/records.tsv"
 : >"$V2_TSV" || v2_fatal "cannot create the record index"
 
-V2_SAVED_IFS="$IFS"
-IFS='
-'
-for v2_path in $V2_RECORDS; do
-  IFS="$V2_SAVED_IFS"
+# The record paths are read from a FILE, one line at a time — never iterated as an unquoted word
+# list. `for p in $LIST` performs pathname expansion as well as word splitting, and setting IFS
+# suppresses only the splitting: a committed record literally named `turns/000[6]-close.md` would
+# glob-expand against the CURRENT DIRECTORY and be replaced by whichever real file matched. Run from
+# a neutral directory the record was inspected and rejected; run from inside the topic directory —
+# the natural `--check .` invocation — it was replaced by its harmless neighbour, never staged, never
+# parsed, and the topic exited 0. The same records must not get two verdicts depending on cwd.
+#
+# Input redirection, not a pipe: a pipe would run this loop in a subshell and discard every violation
+# it counted.
+while IFS= read -r v2_path; do
+  [ -n "$v2_path" ] || continue
   v2_name="${v2_path#turns/}"
   # The record tree is FLAT and every record is a `.md` file. A nested or oddly-named committed path
   # is not silently skipped: a path the validator declines to interpret is a record whose effect on
   # state is unknown, which is the same hazard as an unknown kind.
   case "$v2_name" in
-    */*)   v2_fail RECORD_PATH "$v2_path" "records live directly under turns/, not in a subdirectory"; IFS='
-'; continue ;;
-    *.md)  ;;
-    *)     v2_fail RECORD_PATH "$v2_path" "record files are named SSSS-....md"; IFS='
-'; continue ;;
+    */*)  v2_fail RECORD_PATH "$v2_path" "records live directly under turns/, not in a subdirectory"; continue ;;
+    *.md) ;;
+    *)    v2_fail RECORD_PATH "$v2_path" "record files are named SSSS-....md"; continue ;;
   esac
 
   v2_staged="$(v2_stage_committed "$V2_TOPIC" "$v2_path")" \
@@ -141,28 +163,19 @@ for v2_path in $V2_RECORDS; do
 
   if ! v2_fm_structure "$v2_staged"; then
     v2_fail FM_MALFORMED "$v2_name" "$V2_FM_ERR"
-    IFS='
-'; continue
+    continue
   fi
-  if ! v2_require_common "$v2_staged" "$v2_name"; then
-    IFS='
-'; continue
-  fi
+  v2_require_common "$v2_staged" "$v2_name" || continue
 
   v2_kind="$(v2_fm_get "$v2_staged" kind)"
   if v2_in_list "$v2_kind" "$V2_ATTEMPT_KINDS"; then
-    v2_require_attempt_tuple "$v2_staged" "$v2_name" || { IFS='
-'; continue; }
+    v2_require_attempt_tuple "$v2_staged" "$v2_name" || continue
   fi
-  v2_require_filename "$v2_staged" "$v2_name" || { IFS='
-'; continue; }
+  v2_require_filename "$v2_staged" "$v2_name" || continue
   v2_validate_kind "$v2_staged" "$v2_name"
 
   printf '%s %s %s %s\n' "$(v2_fm_get "$v2_staged" record_seq)" "$v2_kind" "$v2_name" "$v2_staged" >>"$V2_TSV"
-  IFS='
-'
-done
-IFS="$V2_SAVED_IFS"
+done <"$V2_WORK/records.sorted"
 
 # --- ordering ---------------------------------------------------------------------------------------------
 # `record_seq` is the ordering authority. It is strictly increasing AND contiguous from 0001: a gap
@@ -177,8 +190,8 @@ LC_ALL=C sort "$V2_TSV" >"$V2_SORTED" || v2_fatal "cannot order the record index
 # exists whatever the front matter says, and a prefix that disagrees with `record_seq` is
 # SEQ_FILENAME_MISMATCH's own violation.
 V2_PREFIXES="$V2_WORK/prefixes"
-awk '{ n = $0; sub(/^turns\//, "", n); sub(/-.*/, "", n); print n }' "$V2_WORK/records.list" \
-  | LC_ALL=C sort >"$V2_PREFIXES" || v2_fatal "cannot order the record filenames"
+awk 'NF { n = $0; sub(/^turns\//, "", n); sub(/-.*/, "", n); print n }' "$V2_WORK/records.sorted" \
+  >"$V2_PREFIXES" || v2_fatal "cannot order the record filenames"
 
 v2_prev_seq=""
 v2_expect_seq=1

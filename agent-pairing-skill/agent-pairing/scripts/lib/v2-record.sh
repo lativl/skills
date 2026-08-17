@@ -29,9 +29,15 @@ v2_fatal() { # <detail>
 # --- Git access ---------------------------------------------------------------------------------------
 # GIT_NO_REPLACE_OBJECTS keeps a replace ref from substituting the bytes under audit.
 # GIT_OPTIONAL_LOCKS=0 keeps a read-only check from rewriting .git/index in someone else's repository.
+# GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / GIT_COMMON_DIR are UNSET, not merely overridden: an
+# exported GIT_DIR in the caller's environment silently redirects every read here to a different
+# repository, and `-C` does not override it. The validator's whole claim is about which objects it
+# read, so it must not inherit that choice from whoever invoked it.
 v2_git() { # <topic> <git-args...>
   v2_g_topic="$1"; shift
-  GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 git -C "$v2_g_topic" "$@"
+  GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 \
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY \
+      git -C "$v2_g_topic" "$@"
 }
 
 v2_read_committed() { # <topic> <path-in-tree>  -> blob bytes on stdout
@@ -65,21 +71,35 @@ v2_stage_committed() { # <topic> <path-in-tree> -> staged file path
   printf '%s\n' "$v2_s_file"
 }
 
-v2_list_records() { # <topic> -> committed record paths under turns/, LC_ALL=C sorted
-  # An absent turns/ path is an EMPTY record set, not an error: `ls-tree -r --name-only HEAD turns`
-  # exits zero with no output when the path does not exist (verified on Apple Git 2.50.1). A
-  # `cat-file -e … || return 0` guard would be strictly worse — it cannot distinguish an absent path
-  # from a genuine read failure, and would convert fail-closed I/O into an empty record set.
-  #
-  # The read is NOT piped into `sort`. A pipeline's status is its LAST command's, so `ls-tree | sort`
-  # reports sort's success and a damaged record tree reads as an empty record set — a corrupt
-  # repository classified as a clean, never-dispatched topic. Status is captured on its own line.
-  v2_lr_out="$V2_WORK/records.list"
-  if ! v2_git "$1" ls-tree -r --name-only HEAD turns >"$v2_lr_out" 2>"$V2_WORK/git.err"; then
+# Enumerate committed record paths into $V2_WORK/records.sorted, one per line, LC_ALL=C ordered.
+# Sets V2_RECORD_NEWLINE=yes when a committed path contains a newline (see below).
+#
+# An absent turns/ path is an EMPTY record set, not an error: `ls-tree -r --name-only HEAD turns`
+# exits zero with no output when the path does not exist (verified on Apple Git 2.50.1). A
+# `cat-file -e … || return 0` guard would be strictly worse — it cannot distinguish an absent path
+# from a genuine read failure, and would convert fail-closed I/O into an empty record set.
+#
+# The read is NOT piped into `sort`. A pipeline's status is its LAST command's, so `ls-tree | sort`
+# reports sort's success and a damaged record tree reads as an empty record set — a corrupt
+# repository classified as a clean, never-dispatched topic. Status is captured on its own line.
+#
+# `-z` plus `core.quotePath=false` gives RAW path bytes: the default output C-quotes anything
+# non-ASCII or unusual, which would make the validator inspect a record path that is not the one in
+# the tree. Because the caller reads line-by-line, an embedded newline would silently split one
+# record into two; the entry count is compared against the line count so that case is REPORTED
+# rather than mis-parsed.
+V2_RECORD_NEWLINE=no
+v2_list_records() { # <topic>
+  v2_lr_z="$V2_WORK/records.z"
+  if ! v2_git "$1" -c core.quotePath=false ls-tree -r --name-only -z HEAD turns \
+       >"$v2_lr_z" 2>"$V2_WORK/git.err"; then
     return 1
   fi
   : >"$V2_WORK/git.err"
-  LC_ALL=C sort "$v2_lr_out"
+  v2_lr_entries="$(tr -cd '\000' <"$v2_lr_z" | wc -c | tr -d ' ')"
+  tr '\000' '\n' <"$v2_lr_z" | LC_ALL=C sort >"$V2_WORK/records.sorted" || return 1
+  v2_lr_lines="$(grep -c . "$V2_WORK/records.sorted" || true)"
+  if [ "$v2_lr_entries" -ne "$v2_lr_lines" ]; then V2_RECORD_NEWLINE=yes; else V2_RECORD_NEWLINE=no; fi
 }
 
 v2_require_record_repo() { # <topic>
@@ -215,7 +235,13 @@ v2_is_iso8601() {
 # a half-written receipt sitting beside a committed history is exactly the crash state the recovery
 # rules exist for, and silently ignoring it would let a primary believe it dispatched.
 v2_check_uncommitted_residue() { # <topic>
-  v2_res_status="$(v2_git "$1" status --porcelain --untracked-files=all -- turns TOPIC.md artifacts 2>/dev/null)"
+  # `--ignored=matching` is REQUIRED, not defensive. Plain `--porcelain --untracked-files=all` never
+  # reports ignored paths, so a single `turns/0006-*.md` line in a `.gitignore` — or in a global
+  # core.excludesFile the topic never sees — makes a half-written receipt invisible and the topic
+  # classifies as though nothing were there. An ignore rule must not be able to decide whether the
+  # protocol's residue evidence exists.
+  v2_res_status="$(v2_git "$1" status --porcelain --untracked-files=all --ignored=matching \
+                     -- turns TOPIC.md artifacts 2>/dev/null)"
   v2_res_rc=$?
   if [ "$v2_res_rc" -ne 0 ]; then
     v2_fail GIT_READ "$1" "cannot read record working-tree status"

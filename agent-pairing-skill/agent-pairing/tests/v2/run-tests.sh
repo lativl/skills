@@ -116,6 +116,69 @@ if v2_group common; then
       "expected EPOCH_ORDER against 0004-t0001-a01-dispatch.md; got: $(grep -m1 VIOLATION "$V2_OUT")"
   fi
 
+  # Regression: a committed record path that looks like a glob must be INSPECTED, not expanded.
+  # `for p in $LIST` performs pathname expansion even with IFS set, so a record named
+  # `turns/000[6]-close.md` was replaced by whichever real file matched in the CURRENT directory.
+  # Run from a neutral cwd the record was rejected; run from inside the topic it exited 0. The
+  # assertion runs the validator with cwd set to the topic itself, which is where the bug lived.
+  v2_case_glob_named_record() {
+    v2_n="a record path that looks like a glob is inspected, not expanded"
+    v2_t="$(v2_materialize "$V2_FIXTURES/common-valid")" || { v2_nok "$v2_n" "materialize failed"; return; }
+    printf 'GARBAGE NOT FRONT MATTER\n' >"$v2_t/turns/000[6]-close.md"
+    git -C "$v2_t" add -A >/dev/null 2>&1 && git -C "$v2_t" commit -qm glob >/dev/null 2>&1 \
+      || { v2_nok "$v2_n" "cannot commit the glob-named record"; return; }
+    ( cd "$v2_t" && "$V2_VALIDATE" --check . ) >"$V2_OUT" 2>&1
+    v2_rc=$?
+    if [ "$v2_rc" -eq 2 ] && grep -F '000[6]-close.md' "$V2_OUT" >/dev/null; then
+      v2_ok "$v2_n"
+    else
+      v2_nok "$v2_n" "expected exit 2 naming the glob-shaped record; got $v2_rc: $(sed -n '1p' "$V2_OUT")"
+    fi
+  }
+  v2_case_glob_named_record
+
+  # Regression: an ignore rule must not decide whether residue evidence exists. Plain
+  # `--porcelain --untracked-files=all` never reports ignored paths, so one `.gitignore` line made a
+  # half-written receipt invisible and the topic classified as though nothing were there.
+  v2_case_ignored_residue() {
+    v2_n="an ignored record file is still residue"
+    v2_t="$(v2_materialize "$V2_FIXTURES/common-valid")" || { v2_nok "$v2_n" "materialize failed"; return; }
+    printf 'turns/0006-*.md\n' >"$v2_t/.gitignore"
+    git -C "$v2_t" add .gitignore >/dev/null 2>&1 && git -C "$v2_t" commit -qm ignore >/dev/null 2>&1 \
+      || { v2_nok "$v2_n" "cannot commit .gitignore"; return; }
+    printf -- '---\nprotocol_version: 2\n---\nhalf-written\n' >"$v2_t/turns/0006-t0001-a01-result.md"
+    "$V2_VALIDATE" --check "$v2_t" >"$V2_OUT" 2>&1
+    v2_rc=$?
+    if [ "$v2_rc" -eq 2 ] && grep -F 'VIOLATION UNCOMMITTED_RESIDUE' "$V2_OUT" >/dev/null; then
+      v2_ok "$v2_n"
+    else
+      v2_nok "$v2_n" "expected UNCOMMITTED_RESIDUE; got $v2_rc: $(sed -n '1p' "$V2_OUT")"
+    fi
+  }
+  v2_case_ignored_residue
+
+  # Regression: a directory of record files INSIDE another repository is not a record repository.
+  # `rev-parse --git-dir` walks upward, so every HEAD: read resolved against the host repo's tree —
+  # classifying another topic's records as this one's.
+  v2_case_not_own_repo() {
+    v2_n="a topic inside another repository is not a record repository"
+    v2_host="$(mktemp -d "$V2_TMP/host.XXXXXX")" || { v2_nok "$v2_n" "temp failed"; return; }
+    git -C "$v2_host" init -q && git -C "$v2_host" config user.name t && git -C "$v2_host" config user.email t@t \
+      || { v2_nok "$v2_n" "cannot init host repo"; return; }
+    mkdir -p "$v2_host/sub" && cp -R "$V2_FIXTURES/common-valid/." "$v2_host/sub/" \
+      || { v2_nok "$v2_n" "cannot place the topic"; return; }
+    git -C "$v2_host" add -A >/dev/null 2>&1 && git -C "$v2_host" commit -qm host >/dev/null 2>&1 \
+      || { v2_nok "$v2_n" "cannot commit host repo"; return; }
+    "$V2_VALIDATE" --check "$v2_host/sub" >"$V2_OUT" 2>&1
+    v2_rc=$?
+    if [ "$v2_rc" -eq 2 ] && grep -F 'VIOLATION RECORD_REPO' "$V2_OUT" >/dev/null; then
+      v2_ok "$v2_n"
+    else
+      v2_nok "$v2_n" "expected RECORD_REPO; got $v2_rc: $(sed -n '1p' "$V2_OUT")"
+    fi
+  }
+  v2_case_not_own_repo
+
   # The residue case must ALSO prove the working-tree bytes were never treated as records: had the
   # validator read `turns/` from disk, it would have found five well-formed records and could have
   # classified the topic instead of reporting residue. The fixture is re-run rather than read from
