@@ -546,7 +546,125 @@ v2_check_clocks() {
   done <"$V2_SORTED"
 }
 
-v2_schema_ack()            { :; }   # Task 5
+# --- ack: the delivery evidence ---------------------------------------------------------------------------
+#
+# Everything cross-record about the ACK lives here rather than in v2_check_clocks, because an ACK is
+# nothing BUT bindings: it carries no independent facts of its own, and each field is a claim about a
+# record that already exists. Checking it in isolation would validate its shape while leaving every
+# claim unverified.
+v2_schema_ack() { # <staged-file> <display-name>
+  v2_ak_f="$1" v2_ak_n="$2"
+  for v2_ak_k in assignment_ref intent_ref dispatch_ref admission_ref job_id idempotency_token \
+                 observed_head preflight_clean relayed_base_sha ack_evidence_class \
+                 ack_captured_epoch work_due_epoch; do
+    v2_fm_has "$v2_ak_f" "$v2_ak_k" || { v2_fail MISSING_KEY "$v2_ak_n" "missing $v2_ak_k"; return 1; }
+  done
+
+  v2_ak_ce="$(v2_fm_get "$v2_ak_f" ack_captured_epoch)"
+  v2_uint_value "$v2_ak_ce" >/dev/null 2>&1 \
+    || { v2_fail EPOCH_RANGE "$v2_ak_n" "ack_captured_epoch='$v2_ak_ce' is not a decimal integer within the exact range"; return 1; }
+  v2_ak_wd="$(v2_fm_get "$v2_ak_f" work_due_epoch)"
+  v2_uint_value "$v2_ak_wd" >/dev/null 2>&1 \
+    || { v2_fail EPOCH_RANGE "$v2_ak_n" "work_due_epoch='$v2_ak_wd' is not a decimal integer within the exact range"; return 1; }
+}
+
+# The cross-record half: every reference resolved, every bound value compared, and the preflight shape
+# selected by the ADMITTED visibility.
+v2_check_acks() {
+  while read -r v2_ka_seq v2_ka_kind v2_ka_name v2_ka_file; do
+    [ -n "${v2_ka_seq:-}" ] || continue
+    [ "$v2_ka_kind" = ack ] || continue
+
+    v2_ka_aref="$(v2_fm_get "$v2_ka_file" assignment_ref)"
+    v2_ka_ap="$(v2_resolve_ref "$v2_ka_aref" assignment)" || v2_ka_ap=""
+    [ -n "$v2_ka_ap" ] || continue   # LINK_DANGLING is v2_check_attempt_links' own code
+
+    v2_ka_iref="$(v2_fm_get "$v2_ka_file" intent_ref)"
+    v2_ka_ip="$(v2_resolve_ref "$v2_ka_iref" intent)" || v2_ka_ip=""
+    v2_ka_dref="$(v2_fm_get "$v2_ka_file" dispatch_ref)"
+    v2_ka_dp="$(v2_resolve_ref "$v2_ka_dref" dispatch)" || v2_ka_dp=""
+    v2_ka_adref="$(v2_fm_get "$v2_ka_file" admission_ref)"
+    v2_ka_adp="$(v2_resolve_ref "$v2_ka_adref" admission)" || v2_ka_adp=""
+
+    # A reference to the wrong KIND of record is a binding failure, not a dangling link: the record
+    # exists, and the ACK is claiming it is something it is not.
+    if [ -z "$v2_ka_ip" ]; then
+      v2_ref_target_already_faulted "$v2_ka_iref" && continue
+      v2_fail ACK_BINDING "$v2_ka_name" "intent_ref '$v2_ka_iref' is not an intent record of this topic"
+      continue
+    fi
+    if [ -z "$v2_ka_dp" ]; then
+      v2_ref_target_already_faulted "$v2_ka_dref" && continue
+      v2_fail ACK_BINDING "$v2_ka_name" "dispatch_ref '$v2_ka_dref' is not a dispatch record of this topic"
+      continue
+    fi
+    if [ -z "$v2_ka_adp" ]; then
+      v2_ref_target_already_faulted "$v2_ka_adref" && continue
+      v2_fail ACK_BINDING "$v2_ka_name" "admission_ref '$v2_ka_adref' is not an admission record of this topic"
+      continue
+    fi
+
+    # The whole point: the ACK must answer THIS attempt. An ACK bound to another attempt's receipt or
+    # another turn's intent is evidence of a delivery that is not the one under way.
+    [ "$v2_ka_adref" = "$(v2_fm_get "$v2_ka_ap" admission_ref)" ] \
+      || v2_fail ACK_BINDING "$v2_ka_name" "binds admission '$v2_ka_adref' while its assignment binds '$(v2_fm_get "$v2_ka_ap" admission_ref)'"
+    [ "$v2_ka_dref" = "$(v2_fm_get "$v2_ka_ip" expected_dispatch_ref)" ] \
+      || v2_fail ACK_BINDING "$v2_ka_name" "binds receipt '$v2_ka_dref' while its intent expected '$(v2_fm_get "$v2_ka_ip" expected_dispatch_ref)'"
+    [ "$(v2_fm_get "$v2_ka_file" job_id)" = "$(v2_fm_get "$v2_ka_dp" job_id)" ] \
+      || v2_fail ACK_BINDING "$v2_ka_name" "job_id differs from the receipt's job_id"
+    [ "$(v2_fm_get "$v2_ka_file" idempotency_token)" = "$(v2_fm_get "$v2_ka_ip" idempotency_token)" ] \
+      || v2_fail ACK_BINDING "$v2_ka_name" "idempotency_token differs from the intent's token"
+    [ "$(v2_fm_get "$v2_ka_file" ack_evidence_class)" = "$(v2_fm_get "$v2_ka_adp" ack_evidence_class)" ] \
+      || v2_fail ACK_BINDING "$v2_ka_name" "ack_evidence_class differs from the admitted class"
+
+    # --- capability, re-checked at ACK ------------------------------------------------------------------
+    # Already checked at admission. Checked AGAIN here because that is the point of checking it in
+    # three places: an illegal capability must fail closed at the moment it would first matter, not
+    # surface later as unexplained drift.
+    v2_ka_cap="$(v2_fm_get "$v2_ka_adp" capability)"
+    v2_ka_vis="$(v2_fm_get "$v2_ka_adp" worktree_visible)"
+    if [ "$v2_ka_cap" = commits ] && [ "$v2_ka_vis" = false ]; then
+      v2_fail CAPABILITY_VISIBILITY "$v2_ka_name" "capability: commits requires worktree_visible: true"
+      continue
+    fi
+
+    # --- the visibility-specific preflight contract -----------------------------------------------------
+    v2_ka_base="$(v2_fm_get "$v2_ka_ap" base_sha)"
+    v2_ka_head="$(v2_fm_get "$v2_ka_file" observed_head)"
+    v2_ka_clean="$(v2_fm_get "$v2_ka_file" preflight_clean)"
+    v2_ka_relay="$(v2_fm_get "$v2_ka_file" relayed_base_sha)"
+    case "$v2_ka_vis" in
+      true)
+        # The participant looked, so it says what it saw. `preflight_clean: false` is not a milder
+        # ACK — it is the participant reporting that the lease it was handed was already dirty, which
+        # cannot be acknowledged as a clean start.
+        [ "$v2_ka_head" = "$v2_ka_base" ] \
+          || v2_fail ACK_PREFLIGHT "$v2_ka_name" "observed_head '$v2_ka_head' is not the assignment base_sha '$v2_ka_base' (a visible participant reports what it saw)"
+        [ "$v2_ka_clean" = true ] \
+          || v2_fail ACK_PREFLIGHT "$v2_ka_name" "preflight_clean must be true for a visible admission (got '$v2_ka_clean')"
+        [ "$v2_ka_relay" = null ] \
+          || v2_fail ACK_PREFLIGHT "$v2_ka_name" "relayed_base_sha must be null for a visible admission (got '$v2_ka_relay')"
+        ;;
+      false)
+        # The participant did NOT look. Reporting an observation would be a claim it cannot have made,
+        # so the nulls are the honest encoding — and the relay base binds the input it was given.
+        [ "$v2_ka_head" = null ] \
+          || v2_fail ACK_PREFLIGHT "$v2_ka_name" "observed_head must be null for an invisible admission (got '$v2_ka_head'); an invisible participant cannot have observed the worktree"
+        [ "$v2_ka_clean" = null ] \
+          || v2_fail ACK_PREFLIGHT "$v2_ka_name" "preflight_clean must be null for an invisible admission (got '$v2_ka_clean')"
+        [ "$v2_ka_relay" = "$v2_ka_base" ] \
+          || v2_fail ACK_PREFLIGHT "$v2_ka_name" "relayed_base_sha '$v2_ka_relay' is not the assignment base_sha '$v2_ka_base'"
+        ;;
+    esac
+
+    # --- the work budget --------------------------------------------------------------------------------
+    v2_ka_ce="$(v2_fm_get "$v2_ka_file" ack_captured_epoch)"
+    v2_ka_wd="$(v2_fm_get "$v2_ka_file" work_due_epoch)"
+    v2_ka_wt="$(v2_fm_get "$v2_ka_ap" work_timeout_seconds)"
+    v2_sum_eq "$v2_ka_ce" "$v2_ka_wt" "$v2_ka_wd" \
+      || v2_fail WORK_DUE "$v2_ka_name" "work_due_epoch $v2_ka_wd != ack_captured_epoch $v2_ka_ce + assignment work_timeout_seconds $v2_ka_wt"
+  done <"$V2_SORTED"
+}
 v2_schema_result_capture() { :; }   # Task 6
 v2_schema_result()         { :; }   # Task 6
 v2_schema_fence()          { :; }   # Task 7

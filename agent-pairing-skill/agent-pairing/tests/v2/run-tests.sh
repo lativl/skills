@@ -26,7 +26,7 @@ V2_LAST_TOPIC=""
 # Only groups that ACTUALLY HAVE CASES are listed. A group name declared before its task implements
 # it would answer `0 passed, 0 failed` and exit zero — a suite that runs nothing wearing the costume
 # of a suite that passes. Each task appends its own group name here alongside its cases.
-V2_GROUPS="version common admission clocks templates"
+V2_GROUPS="version common admission clocks ack templates"
 V2_ONLY="${1:-}"
 if [ -n "$V2_ONLY" ]; then
   v2_known=no
@@ -298,6 +298,47 @@ if v2_group clocks; then
     clocks/recovery-pre-crash-arithmetic RECOVERY_EPOCH
   v2_expect_only_violation "a pre-crash epoch cannot postdate the re-stamped commit" \
     clocks/recovery-pre-crash-after-dispatch RECOVERY_EPOCH
+fi
+
+# --- ack: the acknowledgement is the delivery evidence --------------------------------------------------
+# A primary-authored receipt proves only that the primary WROTE something. The ACK is the first
+# evidence that the participant actually received the work, and it is worth nothing unless it binds
+# the exact attempt it claims to answer.
+if v2_group ack; then
+  # The full visibility x capability matrix. Only `commits` is constrained by visibility, because it
+  # is the only capability that admits a participant-authored landed commit — and a participant that
+  # cannot see the worktree cannot have authored one in it.
+  v2_expect_ok "visible + commits: observed HEAD, clean, no relay base" ack/valid-visible-commits
+  v2_expect_ok "visible + writes-repo-only" ack/valid-visible-writes
+  v2_expect_ok "visible + read-only" ack/valid-visible-readonly
+  v2_expect_ok "invisible + writes-repo-only: null HEAD, relay base bound" ack/valid-invisible-writes
+  v2_expect_ok "invisible + read-only" ack/valid-invisible-readonly
+
+  v2_expect_only_violation "an invisible participant cannot hold capability: commits" \
+    ack/invisible-commits CAPABILITY_VISIBILITY
+
+  v2_expect_only_violation "the ACK binds the receipt's job_id" ack/wrong-job ACK_BINDING
+  v2_expect_only_violation "the ACK binds the intent's idempotency token" ack/wrong-token ACK_BINDING
+  v2_expect_only_violation "the ACK declares the admitted evidence class" ack/wrong-evidence-class ACK_BINDING
+  v2_expect_only_violation "the ACK binds the assignment's admission" ack/wrong-admission-ref ACK_BINDING
+  v2_expect_only_violation "the ACK binds the attempt's own receipt" ack/wrong-dispatch-ref ACK_BINDING
+
+  # Visible: the participant looked, so it must say what it saw and that the tree was clean.
+  v2_expect_only_violation "a visible ACK carries an observed HEAD" ack/visible-null-head ACK_PREFLIGHT
+  v2_expect_only_violation "a visible ACK's observed HEAD is the assignment base" ack/visible-wrong-head ACK_PREFLIGHT
+  v2_expect_only_violation "a visible ACK's preflight must be clean" ack/visible-dirty ACK_PREFLIGHT
+  v2_expect_only_violation "a visible ACK carries no relay base" ack/visible-relay-base ACK_PREFLIGHT
+
+  # Invisible: the participant did NOT look, so claiming an observation is a false claim. It binds the
+  # relay input instead, and the primary separately verifies the shared worktree is stationary.
+  v2_expect_only_violation "an invisible ACK claims no observation" ack/invisible-observed-head ACK_PREFLIGHT
+  v2_expect_only_violation "an invisible ACK binds the relay base" ack/invisible-null-relay ACK_PREFLIGHT
+  v2_expect_only_violation "an invisible ACK's relay base is the assignment base" ack/invisible-wrong-relay ACK_PREFLIGHT
+
+  # The work budget starts when the ACK is captured — not when the receipt was written, and not when
+  # the participant first saw the prompt.
+  v2_expect_only_violation "the work bound is the captured ACK epoch plus the work timeout" \
+    ack/wrong-work-due WORK_DUE
 fi
 
 # --- templates: the canonical bodies instantiate into a VALID topic ------------------------------------

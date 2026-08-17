@@ -486,6 +486,49 @@ provenance the record depends on. A byte-count or hash mismatch is `ABORTED: tra
 
 ---
 
+## CYCLE — acknowledgement
+
+**The ACK is the only evidence that delivery happened.** Your own receipt proves that *you* wrote
+something. The motivating v1 record contained a receipt, a participant that never had a live
+listener, and nothing in the history that could tell those two apart.
+
+So the participant's **first emitted message** after it observes the committed receipt is not a
+status update and not the start of work. It is the acknowledgement, and it must contain:
+
+- the exact topic, turn and attempt tuple;
+- the exact `idempotency_token` from the intent;
+- the exact `admission_ref` and `dispatch_ref`;
+- the exact `job_id`, when the transport lets the participant see it;
+- the declared `ack_evidence_class`;
+- and one of the two preflight shapes below — never both, never neither.
+
+| `worktree_visible` | The participant sends | Because |
+| --- | --- | --- |
+| `true` | `observed_head` = the assignment's `base_sha`, `preflight_clean: true`, `relayed_base_sha: null` | it looked, so it reports what it saw: `git -C <worktree> rev-parse HEAD` and `git -C <worktree> status --porcelain` |
+| `false` | `observed_head: null`, `preflight_clean: null`, `relayed_base_sha` = the assignment's `base_sha` | it did not look, so claiming an observation would be a false claim; it binds the relay input instead |
+
+**Before capturing an invisible participant's ACK, run your own stationarity check.** The nulls mean
+nobody has verified the worktree, so you do: confirm the tip is still the assigned base and the tree
+is clean. That check is what the visible participant's `observed_head` would have provided.
+
+Then write `templates/ack.md`, commit it, and only now may the participant work. **`work_due_epoch`
+is `ack_captured_epoch + work_timeout_seconds`** — the work clock starts when you capture the ACK,
+not when the receipt was written and not when the participant first saw the prompt.
+
+**Never repair an invalid first response into a valid ACK.** Preserve it verbatim. Under a clean
+stationary worktree it terminates as `REJECTED: ack-preflight-failed`; a moved tip or residue uses
+the quarantine and drift rules. Fabricating the ACK would manufacture the one piece of evidence this
+protocol exists to obtain.
+
+**Capability is re-checked here.** `commits` requires a visible worktree; `writes-repo-only` permits
+visible uncommitted changes or an invisible relay patch but never a participant-authored
+`result_sha`; `read-only` is report-only and produces no landed commit, no worktree modification and
+no relay `patch.diff`. The validator checks this at admission, at assignment binding, and again at
+ACK, so an illegal capability fails closed at the moment it would first matter instead of surfacing
+three turns later as unexplained drift.
+
+---
+
 ## FENCE — deadlines, liveness, and never re-dispatching into uncertainty
 
 Completion and liveness are different questions, and a commit appears only at the end of a turn.

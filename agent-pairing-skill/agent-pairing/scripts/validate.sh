@@ -232,6 +232,7 @@ done <"$V2_SORTED"
 v2_check_admissions "$V2_SORTED"
 v2_check_attempt_links
 v2_check_clocks
+v2_check_acks
 
 [ "$V2_VIOLATIONS" -eq 0 ] || exit 2
 
